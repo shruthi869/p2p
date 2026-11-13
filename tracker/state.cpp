@@ -3,6 +3,9 @@
 
 #include <algorithm>
 
+#include "file_meta.h"
+#include "sha1.h"
+
 namespace p2p {
 
 namespace {
@@ -20,9 +23,8 @@ bool erase_value(std::vector<std::string>& v, const std::string& x) {
 
 }  // namespace
 
-// PLACEHOLDER until Part 4 adds SHA1: digest = SHA1(user + ":" + password).
 std::string password_digest(const std::string& user, const std::string& password) {
-    return "plain:" + user + ":" + password;
+    return sha1_hex(user + ":" + password);
 }
 
 bool valid_id(const std::string& s) {
@@ -52,6 +54,8 @@ Status TrackerState::apply(const Op& op) {
         case MsgType::JOIN_GROUP:     return join_group(op.args);
         case MsgType::LEAVE_GROUP:    return leave_group(op.args);
         case MsgType::ACCEPT_REQUEST: return accept_request(op.args);
+        case MsgType::UPLOAD_FILE:    return upload_file(op.args);
+        case MsgType::STOP_SHARE:     return stop_share(op.args);
         default:                      return Status::UNKNOWN_TYPE;
     }
 }
@@ -85,6 +89,7 @@ Status TrackerState::logout(const std::vector<std::string>& a) {
     // closed" from an older login must not log out the user's newer login.
     if (s == sessions_.end() || s->second.session_id != a[1]) return Status::NOT_LOGGED_IN;
     sessions_.erase(s);
+    drop_seeder_everywhere(a[0]);  // spec: logout = "stop sharing files"
     return Status::OK;
 }
 
@@ -111,6 +116,7 @@ Status TrackerState::leave_group(const std::vector<std::string>& a) {
     auto g = groups_.find(a[1]);
     if (g == groups_.end()) return Status::NO_SUCH_GROUP;
     if (!erase_value(g->second.members, a[0])) return Status::NOT_MEMBER;
+    drop_seeder(g->second, a[0]);  // a non-member can't share in the group
     // Owner left -> members.front() is now the next-oldest member (automatic).
     // Nobody left -> the group (and its pending requests) disappears.
     if (g->second.members.empty()) groups_.erase(g);
@@ -124,6 +130,85 @@ Status TrackerState::accept_request(const std::vector<std::string>& a) {
     if (g->second.members.front() != a[0]) return Status::NOT_OWNER;
     if (!erase_value(g->second.pending, a[2])) return Status::NO_SUCH_REQUEST;
     g->second.members.push_back(a[2]);
+    return Status::OK;
+}
+
+// Share a file's metadata with a group. If the group already has a file with
+// this name: same content (same SHA-1 and size) -> the uploader becomes one
+// more seeder; different content -> FILE_CONFLICT (names are unique per group).
+Status TrackerState::upload_file(const std::vector<std::string>& a) {
+    if (a.size() != 6) return Status::BAD_REQUEST;
+    auto g = groups_.find(a[1]);
+    if (g == groups_.end()) return Status::NO_SUCH_GROUP;
+    if (!contains(g->second.members, a[0])) return Status::NOT_MEMBER;
+
+    uint64_t size = 0;
+    std::vector<std::string> hashes;
+    if (!valid_file_name(a[2]) || !parse_u64(a[3], size) || size == 0 || !is_hex_hash(a[4]) ||
+        !split_hashes(a[5], hashes) || hashes.size() != piece_count(size))
+        return Status::BAD_REQUEST;
+
+    auto f = g->second.files.find(a[2]);
+    if (f != g->second.files.end()) {
+        if (f->second.file_hash != a[4] || f->second.size != size) return Status::FILE_CONFLICT;
+        if (!contains(f->second.seeders, a[0])) f->second.seeders.push_back(a[0]);
+        return Status::OK;  // sharing the same file again is harmless (idempotent)
+    }
+    g->second.files[a[2]] = SharedFile{size, a[4], a[5], {a[0]}};
+    return Status::OK;
+}
+
+Status TrackerState::stop_share(const std::vector<std::string>& a) {
+    if (a.size() != 3) return Status::BAD_REQUEST;
+    auto g = groups_.find(a[1]);
+    if (g == groups_.end()) return Status::NO_SUCH_GROUP;
+    if (!contains(g->second.members, a[0])) return Status::NOT_MEMBER;
+    auto f = g->second.files.find(a[2]);
+    if (f == g->second.files.end()) return Status::NO_SUCH_FILE;
+    if (!erase_value(f->second.seeders, a[0])) return Status::NOT_SHARING;
+    if (f->second.seeders.empty()) g->second.files.erase(f);  // nobody has it any more
+    return Status::OK;
+}
+
+void TrackerState::drop_seeder(Group& g, const std::string& user) {
+    for (auto f = g.files.begin(); f != g.files.end();) {
+        erase_value(f->second.seeders, user);
+        if (f->second.seeders.empty()) f = g.files.erase(f);
+        else ++f;
+    }
+}
+
+void TrackerState::drop_seeder_everywhere(const std::string& user) {
+    for (auto& kv : groups_) drop_seeder(kv.second, user);
+}
+
+Status TrackerState::list_files(const std::string& actor, const std::string& group,
+                                std::vector<FileSummary>& out) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto g = groups_.find(group);
+    if (g == groups_.end()) return Status::NO_SUCH_GROUP;
+    if (!contains(g->second.members, actor)) return Status::NOT_MEMBER;
+    out.clear();
+    for (const auto& kv : g->second.files) out.push_back({kv.first, kv.second.size, kv.second.seeders.size()});
+    return Status::OK;
+}
+
+Status TrackerState::file_info(const std::string& actor, const std::string& group, const std::string& name,
+                               FileDetails& out) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto g = groups_.find(group);
+    if (g == groups_.end()) return Status::NO_SUCH_GROUP;
+    if (!contains(g->second.members, actor)) return Status::NOT_MEMBER;
+    auto f = g->second.files.find(name);
+    if (f == g->second.files.end()) return Status::NO_SUCH_FILE;
+    out.size = f->second.size;
+    out.file_hash = f->second.file_hash;
+    out.piece_hashes = f->second.piece_hashes;
+    out.seeder_addrs.clear();
+    for (const auto& u : f->second.seeders) {
+        auto s = sessions_.find(u);
+        if (s != sessions_.end()) out.seeder_addrs.push_back(s->second.peer_addr);
+    }
     return Status::OK;
 }
 

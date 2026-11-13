@@ -26,6 +26,8 @@ const char* op_name(MsgType t) {
         case MsgType::JOIN_GROUP:     return "join_group";
         case MsgType::LEAVE_GROUP:    return "leave_group";
         case MsgType::ACCEPT_REQUEST: return "accept_request";
+        case MsgType::UPLOAD_FILE:    return "upload_file";
+        case MsgType::STOP_SHARE:     return "stop_share";
         default:                      return "?";
     }
 }
@@ -154,9 +156,11 @@ Message TrackerServer::handle(ClientSession& cs, const Message& req) {
         Status s = state_.apply(op);
         if (s == Status::OK && verbose_) {
             std::string line = op_name(op.type);
-            for (size_t i = 0; i < op.args.size(); ++i)
-                if (!(op.type == MsgType::CREATE_USER || op.type == MsgType::LOGIN) || i != 1)
-                    line += " " + op.args[i];  // never log password digests
+            for (size_t i = 0; i < op.args.size(); ++i) {
+                const bool secret = (op.type == MsgType::CREATE_USER || op.type == MsgType::LOGIN) && i == 1;
+                const bool bulky = op.type == MsgType::UPLOAD_FILE && i >= 4;  // hash lists
+                if (!secret && !bulky) line += " " + op.args[i];  // never log password digests
+            }
             log(line);
         }
         return s;
@@ -224,6 +228,43 @@ Message TrackerServer::handle(ClientSession& cs, const Message& req) {
             else {
                 rep.status = state_.list_requests(cs.user, f[0], pending);
                 rep.payload = pack_fields(pending);
+            }
+            break;
+        }
+
+        case MsgType::UPLOAD_FILE:  // group, name, size, file_sha1, piece_sha1s
+            if (!logged_in)          rep.status = Status::NOT_LOGGED_IN;
+            else if (f.size() != 5)  rep.status = Status::BAD_REQUEST;
+            else rep.status = apply({req.type, {cs.user, f[0], f[1], f[2], f[3], f[4]}});
+            break;
+
+        case MsgType::STOP_SHARE:   // group, name
+            if (!logged_in)          rep.status = Status::NOT_LOGGED_IN;
+            else if (f.size() != 2)  rep.status = Status::BAD_REQUEST;
+            else                     rep.status = apply({req.type, {cs.user, f[0], f[1]}});
+            break;
+
+        case MsgType::LIST_FILES: {  // reply: one field per file, "name\tsize\tseeders"
+            std::vector<FileSummary> files;
+            if (!logged_in)          rep.status = Status::NOT_LOGGED_IN;
+            else if (f.size() != 1)  rep.status = Status::BAD_REQUEST;
+            else if ((rep.status = state_.list_files(cs.user, f[0], files)) == Status::OK) {
+                std::vector<std::string> out;
+                for (const auto& x : files)
+                    out.push_back(x.name + "\t" + std::to_string(x.size) + "\t" + std::to_string(x.seeders));
+                rep.payload = pack_fields(out);
+            }
+            break;
+        }
+
+        case MsgType::FILE_INFO: {  // reply: size, file_sha1, piece_sha1s, seeder addresses...
+            FileDetails d;
+            if (!logged_in)          rep.status = Status::NOT_LOGGED_IN;
+            else if (f.size() != 2)  rep.status = Status::BAD_REQUEST;
+            else if ((rep.status = state_.file_info(cs.user, f[0], f[1], d)) == Status::OK) {
+                std::vector<std::string> out = {std::to_string(d.size), d.file_hash, d.piece_hashes};
+                out.insert(out.end(), d.seeder_addrs.begin(), d.seeder_addrs.end());
+                rep.payload = pack_fields(out);
             }
             break;
         }

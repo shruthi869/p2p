@@ -8,9 +8,11 @@
 #include <unistd.h>
 #include <vector>
 
+#include "file_meta.h"
 #include "net.h"
 #include "protocol.h"
 #include "server.h"
+#include "sha1.h"
 #include "state.h"
 #include "test_util.h"
 
@@ -118,6 +120,70 @@ static void test_list_groups_sorted() {
     CHECK(st.list_groups() == (Fields{"alpha", "mid", "zeta"}));
 }
 
+// Upload op args for a fake file of `size` bytes whose content is "tagged" by `tag`.
+static Fields upload_args(const std::string& actor, const std::string& group, const std::string& name,
+                          uint64_t size, const std::string& tag) {
+    std::vector<std::string> pieces;
+    for (uint64_t i = 0; i < piece_count(size); ++i) pieces.push_back(sha1_hex(tag + std::to_string(i)));
+    return {actor, group, name, std::to_string(size), sha1_hex(tag), join_hashes(pieces)};
+}
+
+static void test_password_digest_is_sha1() {
+    CHECK(password_digest("alice", "pw") == sha1_hex("alice:pw"));
+    CHECK(password_digest("alice", "pw") != password_digest("bob", "pw"));  // user id acts as salt
+}
+
+static void test_file_rules() {
+    TrackerState st;
+    for (auto u : {"alice", "bob", "carol"}) add_user(st, u);
+    op(st, MsgType::LOGIN, {"alice", D("alice", "pw"), "127.0.0.1:7001", "s1"});
+    op(st, MsgType::LOGIN, {"bob", D("bob", "pw"), "127.0.0.1:7002", "s2"});
+    op(st, MsgType::CREATE_GROUP, {"alice", "g"});
+    op(st, MsgType::JOIN_GROUP, {"bob", "g"});
+    op(st, MsgType::ACCEPT_REQUEST, {"alice", "g", "bob"});
+
+    const uint64_t size = kPieceSize * 2 + 5;  // 3 pieces
+    CHECK(op(st, MsgType::UPLOAD_FILE, upload_args("carol", "g", "f.bin", size, "A")) == Status::NOT_MEMBER);
+    CHECK(op(st, MsgType::UPLOAD_FILE, upload_args("alice", "nope", "f.bin", size, "A")) == Status::NO_SUCH_GROUP);
+    Fields wrong_count = upload_args("alice", "g", "f.bin", size, "A");
+    wrong_count[3] = std::to_string(kPieceSize);  // 1 piece declared, 3 hashes sent
+    CHECK(op(st, MsgType::UPLOAD_FILE, wrong_count) == Status::BAD_REQUEST);
+    Fields bad_name = upload_args("alice", "g", "../etc/passwd", size, "A");
+    CHECK(op(st, MsgType::UPLOAD_FILE, bad_name) == Status::BAD_REQUEST);
+    Fields zero = upload_args("alice", "g", "z.bin", 0, "A");
+    CHECK(op(st, MsgType::UPLOAD_FILE, zero) == Status::BAD_REQUEST);
+
+    CHECK(op(st, MsgType::UPLOAD_FILE, upload_args("alice", "g", "f.bin", size, "A")) == Status::OK);
+    CHECK(op(st, MsgType::UPLOAD_FILE, upload_args("alice", "g", "f.bin", size, "A")) == Status::OK);  // idempotent
+    CHECK(op(st, MsgType::UPLOAD_FILE, upload_args("bob", "g", "f.bin", size, "B")) == Status::FILE_CONFLICT);
+    CHECK(op(st, MsgType::UPLOAD_FILE, upload_args("bob", "g", "f.bin", size, "A")) == Status::OK);  // 2nd seeder
+
+    std::vector<FileSummary> files;
+    CHECK(st.list_files("carol", "g", files) == Status::NOT_MEMBER);
+    CHECK(st.list_files("bob", "g", files) == Status::OK && files.size() == 1);
+    CHECK(files[0].name == "f.bin" && files[0].size == size && files[0].seeders == 2);
+
+    FileDetails d;
+    CHECK(st.file_info("bob", "g", "missing", d) == Status::NO_SUCH_FILE);
+    CHECK(st.file_info("bob", "g", "f.bin", d) == Status::OK);
+    CHECK(d.size == size && d.file_hash == sha1_hex("A") && d.piece_hashes.size() == 3 * kHashHexLen);
+    CHECK(d.seeder_addrs == (Fields{"127.0.0.1:7001", "127.0.0.1:7002"}));
+
+    // Logout removes the user as a seeder everywhere ("stop sharing").
+    CHECK(op(st, MsgType::LOGOUT, {"alice", "s1"}) == Status::OK);
+    CHECK(st.file_info("bob", "g", "f.bin", d) == Status::OK && d.seeder_addrs == Fields{"127.0.0.1:7002"});
+
+    CHECK(op(st, MsgType::STOP_SHARE, {"alice", "g", "f.bin"}) == Status::NOT_SHARING);
+    CHECK(op(st, MsgType::STOP_SHARE, {"bob", "g", "nope"}) == Status::NO_SUCH_FILE);
+    CHECK(op(st, MsgType::STOP_SHARE, {"bob", "g", "f.bin"}) == Status::OK);
+    CHECK(st.list_files("bob", "g", files) == Status::OK && files.empty());  // last seeder gone -> file gone
+
+    // Leaving the group drops your shares in it.
+    CHECK(op(st, MsgType::UPLOAD_FILE, upload_args("bob", "g", "h.bin", 10, "H")) == Status::OK);
+    CHECK(op(st, MsgType::LEAVE_GROUP, {"bob", "g"}) == Status::OK);
+    CHECK(st.list_files("alice", "g", files) == Status::OK && files.empty());
+}
+
 // ------------------------------------------------------------ server tests
 
 // A minimal blocking client for talking to the server in tests.
@@ -185,6 +251,19 @@ static void test_server_flow() {
     CHECK(a.st(MsgType::ACCEPT_REQUEST, {"g1", "bob"}) == Status::OK);
     Message groups = b.call(MsgType::LIST_GROUPS);
     CHECK(groups.status == Status::OK && split_fields(groups.payload) == Fields{"g1"});
+
+    // Files over the wire: upload by alice, list + file info by bob.
+    Fields up = upload_args("x", "g1", "doc.txt", 1000, "D");
+    up.erase(up.begin());  // the client doesn't send the actor; the tracker knows who you are
+    CHECK(a.st(MsgType::UPLOAD_FILE, up) == Status::OK);
+    Message lf = b.call(MsgType::LIST_FILES, {"g1"});
+    CHECK(lf.status == Status::OK && split_fields(lf.payload) == Fields{"doc.txt\t1000\t1"});
+    Message fi = b.call(MsgType::FILE_INFO, {"g1", "doc.txt"});
+    Fields info = split_fields(fi.payload);
+    CHECK(fi.status == Status::OK && info.size() == 4 && info[0] == "1000" && info[1] == sha1_hex("D") &&
+          info[3] == "127.0.0.1:7001");
+    CHECK(b.st(MsgType::STOP_SHARE, {"g1", "doc.txt"}) == Status::NOT_SHARING);
+    CHECK(a.st(MsgType::STOP_SHARE, {"g1", "doc.txt"}) == Status::OK);
 
     CHECK(b.st(MsgType::LEAVE_GROUP, {"g1"}) == Status::OK);
     CHECK(a.st(MsgType::LOGOUT) == Status::OK);
@@ -288,6 +367,8 @@ int main() {
         {"group rules", test_group_rules},
         {"owner handover", test_owner_handover},
         {"list_groups sorted", test_list_groups_sorted},
+        {"password digest = salted sha1", test_password_digest_is_sha1},
+        {"file sharing rules", test_file_rules},
         {"server: full user/group flow", test_server_flow},
         {"server: auto logout on disconnect", test_auto_logout_on_disconnect},
         {"server: garbage + unknown type", test_bad_clients},

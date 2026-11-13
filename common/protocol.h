@@ -84,6 +84,7 @@ enum class Status : uint8_t {
     NO_SUCH_FILE     = 16,
     NO_SUCH_PIECE    = 17,
     INTERNAL_ERROR   = 18,
+    NOT_SHARING      = 19,  // stop_share on a file you are not sharing
 };
 
 struct Message {

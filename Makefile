@@ -17,7 +17,7 @@ MODE   := plain
 endif
 
 SUBDIRS   := tracker client tests
-TEST_BINS := tests/test_protocol tests/test_tracker tests/test_client
+TEST_BINS := tests/test_protocol tests/test_tracker tests/test_client tests/test_files
 
 all: tracker client
 
@@ -26,7 +26,12 @@ tracker client tests:
 
 test: all tests
 	@for t in $(TEST_BINS); do echo "--- $$t$(SUFFIX)"; ./$$t$(SUFFIX) || exit 1; done
+	@echo "--- sha1 vs sha1sum"; SUF=$(SUFFIX) bash tests/sha1_crosscheck.sh
 	@echo "--- integration ($(MODE))"; MODE=$(MODE) bash tests/integration.sh
+
+# Same as `test`, plus the 1 GiB cases (slow: creates and hashes 1 GiB files).
+test-large: all tests
+	@echo "--- sha1 vs sha1sum (with 1 GiB)"; LARGE=1 bash tests/sha1_crosscheck.sh
 
 asan:
 	$(MAKE) test SAN=address
@@ -44,4 +49,4 @@ clean:
 	for d in $(SUBDIRS); do $(MAKE) -C $$d clean; done
 	rm -rf test_runs
 
-.PHONY: all tracker client tests test asan tsan valgrind clean
+.PHONY: all tracker client tests test test-large asan tsan valgrind clean

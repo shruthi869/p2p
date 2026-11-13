@@ -9,6 +9,7 @@
 // which applies it too (state machine replication, in miniature).
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <mutex>
 #include <string>
@@ -26,14 +27,33 @@ namespace p2p {
 //   JOIN_GROUP     actor, group
 //   LEAVE_GROUP    actor, group
 //   ACCEPT_REQUEST actor, group, user
+//   UPLOAD_FILE    actor, group, file_name, size, file_sha1, piece_sha1s (joined)
+//   STOP_SHARE     actor, group, file_name
 struct Op {
     MsgType                  type;
     std::vector<std::string> args;
 };
 
-// What we store instead of the password. Part 4 replaces this with a salted
-// SHA1; until SHA1 exists it is a clearly-marked placeholder.
+// What we store instead of the password: SHA1(user_id + ":" + password).
+// The user id acts as a salt, so two users with the same password get
+// different digests. (Real systems: random salt + a deliberately slow hash
+// such as bcrypt/argon2, to make brute force expensive.)
 std::string password_digest(const std::string& user, const std::string& password);
+
+// One file in a group listing (LIST_FILES).
+struct FileSummary {
+    std::string name;
+    uint64_t    size = 0;
+    size_t      seeders = 0;
+};
+
+// Everything a downloader needs (FILE_INFO).
+struct FileDetails {
+    uint64_t                 size = 0;
+    std::string              file_hash;
+    std::string              piece_hashes;  // joined, 40 hex chars per piece
+    std::vector<std::string> seeder_addrs;  // "ip:port" of online seeders
+};
 
 // Id rules: 1-64 chars of [A-Za-z0-9_.-]. Passwords: 1-128 printable, no spaces.
 bool valid_id(const std::string& s);
@@ -49,6 +69,10 @@ public:
     std::vector<std::string> list_groups() const;
     Status list_requests(const std::string& actor, const std::string& group,
                          std::vector<std::string>& out) const;
+    Status list_files(const std::string& actor, const std::string& group,
+                      std::vector<FileSummary>& out) const;
+    Status file_info(const std::string& actor, const std::string& group, const std::string& name,
+                     FileDetails& out) const;
 
     // Small helpers for tests and logs.
     bool        user_exists(const std::string& user) const;
@@ -64,11 +88,21 @@ private:
         std::string peer_addr;   // where this user's client serves pieces
         std::string session_id;  // unique per login, so a stale disconnect can't log out a newer login
     };
+    // A shared file. The tracker stores only METADATA, never file data.
+    // A file exists only while someone shares it: when the last seeder stops
+    // (stop_share, logout, disconnect, leave_group) the entry is removed.
+    struct SharedFile {
+        uint64_t                 size = 0;
+        std::string              file_hash;
+        std::string              piece_hashes;  // joined
+        std::vector<std::string> seeders;       // user ids, in the order they started sharing
+    };
     struct Group {
         // members in join order; members.front() IS the owner. When the owner
         // leaves, the next-oldest member automatically becomes owner.
-        std::vector<std::string> members;
-        std::vector<std::string> pending;  // join requests, in arrival order
+        std::vector<std::string>          members;
+        std::vector<std::string>          pending;  // join requests, in arrival order
+        std::map<std::string, SharedFile> files;    // file name -> metadata
     };
 
     // Each handler assumes mu_ is held.
@@ -79,6 +113,12 @@ private:
     Status join_group(const std::vector<std::string>& a);
     Status leave_group(const std::vector<std::string>& a);
     Status accept_request(const std::vector<std::string>& a);
+    Status upload_file(const std::vector<std::string>& a);
+    Status stop_share(const std::vector<std::string>& a);
+
+    // Remove `user` as a seeder from the files of one group / every group.
+    static void drop_seeder(Group& g, const std::string& user);
+    void        drop_seeder_everywhere(const std::string& user);
 
     // One mutex for the whole state: simple, obviously deadlock-free, and the
     // tracker's work per request is tiny (map lookups), so contention is low.

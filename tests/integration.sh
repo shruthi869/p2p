@@ -52,7 +52,51 @@ section "input handling"
 send c1 "create_group";              expect c1 "^usage: create_group <group_id>"
 send c1 "fly_to_moon";               expect c1 "^error: unknown command 'fly_to_moon'"
 send c1 "join_group no_such_group";  expect c1 "^error: no such group"
-send c1 "upload_file g1 /etc/hostname"; expect c1 "^error: 'upload_file' is not implemented yet"
+send c1 "show_downloads";            expect c1 "^error: 'show_downloads' is not implemented yet"
+
+section "upload_file / list_files / stop_share (group g2, owner bob on c2)"
+F="$RUN/files"; mkdir -p "$F/other" "$F/copy"
+printf 'hello p2p\n' >"$F/small.txt"
+head -c 524288 /dev/urandom >"$F/exact512k.bin"   # exactly one piece
+head -c 1572987 /dev/urandom >"$F/big.bin"         # 4 pieces, last one partial
+printf 'different!\n' >"$F/other/small.txt"        # same name, different content
+cp "$F/small.txt" "$F/copy/small.txt"              # same name, same content
+: >"$F/empty.txt"
+small_sha=$(sha1sum "$F/small.txt" | cut -d' ' -f1)
+big_sha=$(sha1sum "$F/big.bin" | cut -d' ' -f1)
+
+send c2 "upload_file g2 $F/small.txt";     expect c2 "^uploaded small.txt to group g2: 10 bytes, 1 pieces, sha1 $small_sha$"
+send c2 "upload_file g2 $F/exact512k.bin"; expect c2 "^uploaded exact512k.bin to group g2: 524288 bytes, 1 pieces"
+send c2 "upload_file g2 $F/big.bin";       expect c2 "^uploaded big.bin to group g2: 1572987 bytes, 4 pieces, sha1 $big_sha$"
+send c2 "upload_file g2 $F/nope.bin";      expect c2 "^error: cannot open .*nope.bin"
+send c2 "upload_file g2 $F";               expect c2 "^error: .* is not a regular file"
+send c2 "upload_file g2 $F/empty.txt";     expect c2 "^error: .* is empty"
+send c2 "upload_file nogroup $F/small.txt"; expect c2 "^error: no such group"
+send c1 "list_files g2";                   expect c1 "^error: you are not a member of this group"
+send c1 "upload_file g2 $F/small.txt";     expect c1 "^error: you are not a member of this group"
+send c1 "join_group g2";                   expect c1 "^join request sent"
+send c2 "accept_request g2 alice";         expect c2 "^alice added to group g2"
+send c1 "list_files g2";                   expect c1 "^files in g2 \(3\):"
+                                           expect c1 "^  big.bin  \(1572987 bytes, 4 pieces, 1 seeder\(s\)\)"
+                                           expect c1 "^  exact512k.bin  \(524288 bytes, 1 pieces, 1 seeder\(s\)\)"
+                                           expect c1 "^  small.txt  \(10 bytes, 1 pieces, 1 seeder\(s\)\)"
+send c1 "upload_file g2 $F/other/small.txt"; expect c1 "^error: a different file with this name is already shared"
+send c1 "upload_file g2 $F/copy/small.txt";  expect c1 "^uploaded small.txt to group g2"
+send c1 "list_files g2";                   expect c1 "^  small.txt  \(10 bytes, 1 pieces, 2 seeder\(s\)\)"
+send c1 "stop_share g2 big.bin";           expect c1 "^error: you are not sharing this file"
+send c2 "stop_share g2 big.bin";           expect c2 "^stopped sharing big.bin in group g2"
+send c2 "stop_share g2 big.bin";           expect c2 "^error: no such file in this group"   # last seeder left -> gone
+send c1 "list_files g2";                   expect c1 "^files in g2 \(2\):"
+
+section "logout stops sharing; login shares again"
+send c2 "logout";                          expect c2 "^logged out"
+send c1 "list_files g2";                   expect c1 "^files in g2 \(1\):"                   # only alice's small.txt
+                                           expect c1 "^  small.txt  \(10 bytes, 1 pieces, 1 seeder\(s\)\)"
+send c2 "login bob pw_b";                  expect c2 "^logged in as bob"
+                                           expect c2 "^re-shared 2 of 2 file\(s\)"
+send c1 "list_files g2";                   expect c1 "^files in g2 \(2\):"
+                                           expect c1 "^  exact512k.bin"
+                                           expect c1 "^  small.txt  \(10 bytes, 1 pieces, 2 seeder\(s\)\)"
 
 section "logout"
 send c2 "logout";                    expect c2 "^logged out"

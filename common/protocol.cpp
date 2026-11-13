@@ -151,6 +151,7 @@ const char* status_text(Status s) {
         case Status::NO_SUCH_FILE:      return "no such file in this group";
         case Status::NO_SUCH_PIECE:     return "peer does not have that piece";
         case Status::INTERNAL_ERROR:    return "internal error";
+        case Status::NOT_SHARING:       return "you are not sharing this file";
     }
     return "unknown status";
 }

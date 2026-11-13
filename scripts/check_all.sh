@@ -14,7 +14,7 @@ step() { printf '\n===== %s =====\n' "$1"; }
 run() {
     local name=$1; shift
     if "$@" >"$LOGS/$name.log" 2>&1; then :; else fail=1; echo "  (FAILED - see $LOGS/$name.log)"; fi
-    grep -E 'checks,|leaked|RESULT|FAIL|SMOKE' "$LOGS/$name.log" | sed 's/^/  /'
+    grep -E 'checks,|leaked|RESULT|FAIL|SMOKE|CROSSCHECK' "$LOGS/$name.log" | sed 's/^/  /'
 }
 
 step "clean build"

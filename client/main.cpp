@@ -9,6 +9,7 @@
 
 #include "commands.h"
 #include "net.h"
+#include "shared_files.h"
 #include "tracker_link.h"
 
 int main(int argc, char** argv) {
@@ -36,7 +37,8 @@ int main(int argc, char** argv) {
     p2p::TrackerLink link(trackers);
     if (!link.ensure_connected(err)) std::printf("warning: %s (will retry on each command)\n", err.c_str());
 
-    p2p::ClientApp app(link, self);
+    p2p::SharedFiles shared;
+    p2p::ClientApp app(link, self, shared);
     const bool interactive = ::isatty(STDIN_FILENO);
     std::string line;
     while (true) {
