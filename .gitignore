@@ -11,6 +11,8 @@ obj-*/
 /tests/test_protocol-*
 /tests/test_tracker
 /tests/test_tracker-*
+/tests/test_client
+/tests/test_client-*
 
 # hand-written practice code (personal, not part of the project)
 practice/
