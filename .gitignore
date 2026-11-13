@@ -1,0 +1,17 @@
+# build outputs
+obj/
+obj-*/
+*.o
+*.d
+/tracker/tracker
+/tracker/tracker-*
+/client/client
+/client/client-*
+/tests/test_protocol
+/tests/test_protocol-*
+
+# hand-written practice code (personal, not part of the project)
+practice/
+
+# files created by test runs
+test_runs/

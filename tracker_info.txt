@@ -1,0 +1,3 @@
+# One tracker per line: <IP> <PORT>. Line 1 = tracker 1, line 2 = tracker 2.
+127.0.0.1 6001
+127.0.0.1 6002
