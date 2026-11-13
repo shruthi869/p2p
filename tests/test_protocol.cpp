@@ -14,20 +14,9 @@
 
 #include "net.h"
 #include "protocol.h"
+#include "test_util.h"
 
 using namespace p2p;
-
-static int g_checks = 0;
-static int g_failures = 0;
-
-#define CHECK(cond)                                                                    \
-    do {                                                                               \
-        ++g_checks;                                                                    \
-        if (!(cond)) {                                                                 \
-            ++g_failures;                                                              \
-            std::fprintf(stderr, "  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);     \
-        }                                                                              \
-    } while (0)
 
 // A connected pair of stream sockets in one process: fd[0] <-> fd[1].
 struct SockPair {
@@ -54,15 +43,6 @@ static std::string raw_header(char m0, char m1, uint8_t type, uint8_t status, ui
     h[4] = static_cast<char>(len >> 24); h[5] = static_cast<char>(len >> 16);
     h[6] = static_cast<char>(len >> 8);  h[7] = static_cast<char>(len);
     return h;
-}
-
-static int count_open_fds() {
-    int n = 0;
-    DIR* d = ::opendir("/proc/self/fd");
-    if (!d) return -1;
-    while (dirent* e = ::readdir(d)) if (e->d_name[0] != '.') ++n;
-    ::closedir(d);
-    return n - 1;  // minus the fd opendir itself used
 }
 
 // ---------------------------------------------------------------- tests
@@ -296,12 +276,7 @@ static void test_connect_refused() {
 }
 
 int main() {
-    // Watchdog: a protocol bug often shows up as a deadlock (reader waits for
-    // bytes that never come). SIGALRM's default action kills us with a
-    // non-zero exit, so a hang becomes a test failure instead of a stuck run.
-    ::alarm(120);
-    const int fds_before = count_open_fds();
-    struct { const char* name; void (*fn)(); } tests[] = {
+    static const TestCase tests[] = {
         {"small roundtrip", test_small_roundtrip},
         {"empty payload + reply type", test_empty_payload_and_reply_type},
         {"512 KiB payload (partial send/recv)", [] { test_large_payload(512 * 1024); }},
@@ -321,14 +296,5 @@ int main() {
         {"tcp loopback", test_tcp_loopback},
         {"connect refused", test_connect_refused},
     };
-    for (auto& t : tests) {
-        const int before = g_failures;
-        t.fn();
-        std::printf("[%s] %s\n", g_failures == before ? "PASS" : "FAIL", t.name);
-    }
-    const int leaked = count_open_fds() - fds_before;
-    CHECK(leaked == 0);
-    std::printf("fd leak check: %d fds leaked\n", leaked);
-    std::printf("%d checks, %d failures\n", g_checks, g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return run_tests(tests);
 }

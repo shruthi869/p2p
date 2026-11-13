@@ -22,15 +22,18 @@ grep -v '^make' test.log; rm -f test.log
 
 step "AddressSanitizer + UBSan"
 make --no-print-directory asan >asan.log 2>&1 || { cat asan.log; fail=1; }
-tail -2 asan.log; rm -f asan.log
+grep -E 'checks,|leaked' asan.log; rm -f asan.log
 
 step "ThreadSanitizer"
 make --no-print-directory tsan >tsan.log 2>&1 || { cat tsan.log; fail=1; }
-tail -2 tsan.log; rm -f tsan.log
+grep -E 'checks,|leaked' tsan.log; rm -f tsan.log
 
 step "valgrind"
 make --no-print-directory valgrind >vg.log 2>&1 || { cat vg.log; fail=1; }
-tail -2 vg.log; rm -f vg.log
+grep -E 'checks,|leaked' vg.log; rm -f vg.log
+
+step "tracker binary smoke test (valgrind)"
+bash tests/smoke_tracker.sh || fail=1
 
 echo
 [ $fail -eq 0 ] && echo "ALL CHECKS PASSED" || echo "SOME CHECKS FAILED"

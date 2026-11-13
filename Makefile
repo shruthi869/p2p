@@ -19,8 +19,10 @@ all: tracker client
 tracker client tests:
 	$(MAKE) -C $@
 
+TEST_BINS := tests/test_protocol tests/test_tracker
+
 test: all tests
-	./tests/test_protocol$(SUFFIX)
+	@for t in $(TEST_BINS); do echo "--- $$t$(SUFFIX)"; ./$$t$(SUFFIX) || exit 1; done
 
 asan:
 	$(MAKE) test SAN=address
@@ -29,8 +31,9 @@ tsan:
 	$(MAKE) test SAN=thread
 
 valgrind: all tests
-	valgrind --quiet --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=all \
-	    --error-exitcode=1 ./tests/test_protocol
+	@for t in $(TEST_BINS); do echo "--- valgrind $$t"; \
+	    valgrind --quiet --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=all \
+	    --error-exitcode=1 ./$$t || exit 1; done
 
 clean:
 	for d in $(SUBDIRS); do $(MAKE) -C $$d clean; done
