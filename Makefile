@@ -32,6 +32,7 @@ test: all tests
 # Same as `test`, plus the 1 GiB cases (slow: creates and hashes 1 GiB files).
 test-large: all tests
 	@echo "--- sha1 vs sha1sum (with 1 GiB)"; LARGE=1 bash tests/sha1_crosscheck.sh
+	@echo "--- 1 GiB end-to-end"; bash tests/large.sh
 
 asan:
 	$(MAKE) test SAN=address
