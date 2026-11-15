@@ -19,6 +19,8 @@ obj-*/
 /tests/sha1tool-*
 /tests/test_download
 /tests/test_download-*
+/tests/test_picker
+/tests/test_picker-*
 
 # hand-written practice code (personal, not part of the project)
 practice/

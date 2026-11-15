@@ -181,7 +181,7 @@ void ClientApp::cmd_upload_file(const Args& a) {
                  {group, meta.name, std::to_string(meta.size), meta.file_hash, join_hashes(meta.piece_hashes)},
                  rep))
         return;
-    shared_.add({group, path, meta});
+    shared_.add({group, path, meta, {}});  // {} = complete file (no partial-piece map)
     std::printf("uploaded %s to group %s: %llu bytes, %zu pieces, sha1 %s\n", meta.name.c_str(), group.c_str(),
                 static_cast<unsigned long long>(meta.size), meta.piece_hashes.size(), meta.file_hash.c_str());
 }
@@ -237,9 +237,10 @@ void ClientApp::cmd_show_downloads() {
             std::printf("[F] [%s] %s - %s\n", d.group.c_str(), d.name.c_str(), d.error.c_str());
         } else {
             const unsigned pct = d.pieces_total ? static_cast<unsigned>(d.pieces_done * 100 / d.pieces_total) : 0;
-            std::printf("[D] [%s] %s %u%% (%llu/%llu pieces)\n", d.group.c_str(), d.name.c_str(), pct,
-                        static_cast<unsigned long long>(d.pieces_done),
-                        static_cast<unsigned long long>(d.pieces_total));
+            std::printf("[D] [%s] %s %u%% (%llu/%llu pieces, %llu peer(s))\n", d.group.c_str(), d.name.c_str(),
+                        pct, static_cast<unsigned long long>(d.pieces_done),
+                        static_cast<unsigned long long>(d.pieces_total),
+                        static_cast<unsigned long long>(d.peers_active));
         }
     }
 }

@@ -1,8 +1,9 @@
 #!/bin/bash
 # large.sh - 1 GiB end-to-end checks with the REAL binaries (slow; `make test-large`).
 #   - upload_file of a 1 GiB file: printed SHA-1 must equal sha1sum, 2048 pieces
-#   - the client's peak memory (VmHWM) must stay small: the file is streamed,
-#     never loaded whole
+#   - download it from 1, then 2, then 3 seeders: identical (cmp), speed of each
+#   - peak memory (VmHWM) of uploader and downloaders stays small: files are
+#     streamed piece by piece, never loaded whole
 source "$(dirname "$0")/lib.sh"
 setup_run large
 
@@ -11,6 +12,12 @@ mkdir -p "$RUN/files"
 echo "  creating 1 GiB test file..."
 head -c 1073741824 /dev/urandom >"$BIG"
 big_sha=$(sha1sum "$BIG" | cut -d' ' -f1)
+
+check_peak() {  # check_peak CLIENT WHAT
+    local kb
+    kb=$(awk '/VmHWM/ {print $2}' "/proc/${PID[$1]}/status")
+    if [ -n "$kb" ] && [ "$kb" -lt 50000 ]; then pass "$2: peak memory ${kb} KB"; else fail "$2: peak memory ${kb:-?} KB (expected < 50 MB)"; fi
+}
 
 section "upload a 1 GiB file"
 start_tracker 1
@@ -22,42 +29,38 @@ send c1 "login big pw";         expect c1 "^logged in as big"
 send c1 "create_group gl";      expect c1 "^group gl created"
 send c1 "upload_file gl $BIG";  expect c1 "^uploaded big1g.bin to group gl: 1073741824 bytes, 2048 pieces, sha1 $big_sha$" 120
 send c1 "list_files gl";        expect c1 "^  big1g.bin  \(1073741824 bytes, 2048 pieces, 1 seeder\(s\)\)"
+check_peak c1 "uploader hashing 1 GiB"
 
-# Peak resident memory of the client process so far (it just hashed 1 GiB).
-peak_kb=$(awk '/VmHWM/ {print $2}' "/proc/${PID[c1]}/status")
-if [ -n "$peak_kb" ] && [ "$peak_kb" -lt 50000 ]; then
-    pass "client peak memory ${peak_kb} KB while hashing 1 GiB (streamed)"
-else
-    fail "client peak memory ${peak_kb:-?} KB (expected < 50 MB)"
-fi
+# download_from CLIENT PORT USER EXPECTED_PEERS : new client joins gl and downloads the file
+download_from() {
+    local c=$1 port=$2 user=$3 npeers=$4
+    start_client "$c" "$port"
+    expect "$c" "\[connected to tracker 1"
+    send "$c" "create_user $user pw";    expect "$c" "^user $user created"
+    send "$c" "login $user pw";          expect "$c" "^logged in as $user"
+    send "$c" "join_group gl";           expect "$c" "^join request sent"
+    send c1 "accept_request gl $user";   expect c1 "^$user added to group gl"
+    local dl="$RUN/dl_$c"; mkdir -p "$dl"
+    local t0 t1 secs
+    t0=$(date +%s.%N)
+    send "$c" "download_file gl big1g.bin $dl"
+    expect "$c" "^download finished: \[C\] \[gl\] big1g.bin$" 300
+    t1=$(date +%s.%N)
+    secs=$(echo "$t1 - $t0" | bc)
+    expect "$c" "^  pieces from:( 127.0.0.1:[0-9]+=[1-9][0-9]*){$npeers}$"
+    pass "SPEED with $npeers seeder(s): 1 GiB in $(printf '%.1f' "$secs")s = $(echo "1024 / $secs" | bc) MiB/s  [$(grep '^  pieces from:' "$RUN/$c.out" | tail -1 | sed 's/^  //')]"
+    same_file "$BIG" "$dl/big1g.bin"
+    check_peak "$c" "downloader ($npeers seeder(s))"
+}
 
-section "download the 1 GiB file from one peer"
-start_client c2 7102
-expect c2 "\[connected to tracker 1"
-send c2 "create_user dl pw";    expect c2 "^user dl created"
-send c2 "login dl pw";          expect c2 "^logged in as dl"
-send c2 "join_group gl";        expect c2 "^join request sent"
-send c1 "accept_request gl dl"; expect c1 "^dl added to group gl"
-DL="$RUN/dl"; mkdir -p "$DL"
-t0=$(date +%s.%N)
-send c2 "download_file gl big1g.bin $DL"
-expect c2 "^download finished: \[C\] \[gl\] big1g.bin$" 300
-t1=$(date +%s.%N)
-secs=$(echo "$t1 - $t0" | bc)
-pass "1 GiB downloaded in ${secs}s ($(echo "1024 / $secs" | bc) MiB/s, includes final whole-file SHA-1 check)"
-same_file "$BIG" "$DL/big1g.bin"
-peak_kb=$(awk '/VmHWM/ {print $2}' "/proc/${PID[c2]}/status")
-if [ -n "$peak_kb" ] && [ "$peak_kb" -lt 50000 ]; then
-    pass "downloader peak memory ${peak_kb} KB for a 1 GiB download"
-else
-    fail "downloader peak memory ${peak_kb:-?} KB (expected < 50 MB)"
-fi
-peak_kb=$(awk '/VmHWM/ {print $2}' "/proc/${PID[c1]}/status")
-pass "seeder peak memory ${peak_kb} KB after serving 1 GiB"
+section "download the 1 GiB file from 1, 2 and 3 seeders"
+download_from c2 7102 dl1 1   # seeders: c1
+download_from c3 7103 dl2 2   # seeders: c1, c2
+download_from c4 7104 dl3 3   # seeders: c1, c2, c3
+check_peak c1 "original seeder after serving three downloads"
 
-stop c2
-stop c1
+for c in c4 c3 c2 c1; do stop $c; done
 stop t1
 stop t2
-rm -f "$BIG" "$DL/big1g.bin"
+rm -f "$BIG" "$RUN"/dl_*/big1g.bin
 finish

@@ -1,7 +1,11 @@
 // peer_server.h - the "seeder" half of every client: listens on the
 // client's <IP>:<PORT> and answers other peers' piece requests.
 //
-//   GET_PIECE  fields: group, file_name, piece_index  -> reply payload = raw piece bytes
+//   GET_PIECE_MAP  fields: group, file_name               -> "1101..." (which pieces we have)
+//   GET_PIECE      fields: group, file_name, piece_index  -> reply payload = raw piece bytes
+//
+// A file we are still downloading is served too, but only the pieces we
+// already verified ("partial seeding").
 //
 // Only files registered in SharedFiles can be served, looked up by
 // (group, name). A request can never name a path on disk, so "../../etc/passwd"

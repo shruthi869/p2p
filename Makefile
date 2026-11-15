@@ -17,7 +17,8 @@ MODE   := plain
 endif
 
 SUBDIRS   := tracker client tests
-TEST_BINS := tests/test_protocol tests/test_tracker tests/test_client tests/test_files tests/test_download
+TEST_BINS := tests/test_protocol tests/test_tracker tests/test_client tests/test_files tests/test_picker \
+             tests/test_download
 
 all: tracker client
 

@@ -30,11 +30,19 @@ void PeerServer::serve(int fd) {
 Message PeerServer::handle(const Message& req) {
     Message rep;
     rep.type = reply_type(req.type);
+    const std::vector<std::string> f = split_fields(req.payload);
+
+    if (req.type == MsgType::GET_PIECE_MAP) {  // fields: group, name -> "1101..." one char per piece
+        SharedFile sf;
+        if (f.size() != 2) rep.status = Status::BAD_REQUEST;
+        else if (!shared_.find(f[0], f[1], sf)) rep.status = Status::NO_SUCH_FILE;
+        else rep.payload = sf.piece_map();
+        return rep;
+    }
     if (req.type != MsgType::GET_PIECE) {
         rep.status = Status::UNKNOWN_TYPE;
         return rep;
     }
-    const std::vector<std::string> f = split_fields(req.payload);
     uint64_t index = 0;
     if (f.size() != 3 || !parse_u64(f[2], index)) {
         rep.status = Status::BAD_REQUEST;
@@ -45,7 +53,8 @@ Message PeerServer::handle(const Message& req) {
         rep.status = Status::NO_SUCH_FILE;
         return rep;
     }
-    if (index >= piece_count(sf.meta.size)) {
+    // Out of range, or a piece our own (still running) download hasn't got yet.
+    if (index >= piece_count(sf.meta.size) || !sf.has_piece(index)) {
         rep.status = Status::NO_SUCH_PIECE;
         return rep;
     }

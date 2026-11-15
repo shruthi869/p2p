@@ -106,11 +106,19 @@ same_file "$F/exact512k.bin" "$DL1/exact512k.bin"
 send c2 "upload_file g2 $F/big.bin";             expect c2 "^uploaded big.bin"
 send c1 "download_file g2 big.bin $DL1";         expect c1 "^download finished: \[C\] \[g2\] big.bin$" 20
 same_file "$F/big.bin" "$DL1/big.bin"
-send c1 "download_file g2 small.txt $DL1";       expect c1 "^download finished: \[C\] \[g2\] small.txt$" 20
-same_file "$F/small.txt" "$DL1/small.txt"
+send c1 "download_file g2 small.txt $DL1";       expect c1 "^error: you are already sharing small.txt in group g2"  # alice uploaded her own copy
+printf 'line one\nline two\n' >"$F/notes.txt"     # a small text file only bob has
+send c2 "upload_file g2 $F/notes.txt";           expect c2 "^uploaded notes.txt"
+send c1 "download_file g2 notes.txt $DL1";       expect c1 "^download finished: \[C\] \[g2\] notes.txt$" 20
+same_file "$F/notes.txt" "$DL1/notes.txt"
+head -c 20971000 /dev/urandom >"$F/mid.bin"      # 40 pieces, for the multi-peer tests below
+send c2 "upload_file g2 $F/mid.bin";             expect c2 "^uploaded mid.bin to group g2: 20971000 bytes, 40 pieces" 30
+send c1 "download_file g2 mid.bin $DL1";         expect c1 "^download finished: \[C\] \[g2\] mid.bin$" 30
+                                                 expect c1 "^  pieces from: 127.0.0.1:7102=40$"   # only bob had it
+same_file "$F/mid.bin" "$DL1/mid.bin"
 send c1 "show_downloads";                        expect c1 "^\[C\] \[g2\] exact512k.bin$"
                                                  expect c1 "^\[C\] \[g2\] big.bin$"
-                                                 expect c1 "^\[C\] \[g2\] small.txt$"
+                                                 expect c1 "^\[C\] \[g2\] notes.txt$"
 no_part_files "$DL1"
 send c1 "download_file g2 big.bin $DL1";         expect c1 "^error: .*big.bin already exists"
 send c1 "download_file g2 nope.bin $DL1";        expect c1 "^error: no such file in this group"
@@ -132,17 +140,38 @@ expect c4 "\[connected to tracker 1"
 send c4 "login carol pw_c";          expect c4 "^logged in as carol"   # different address: only works if the old session ended
 
 section "corrupted piece is detected and re-fetched from another peer"
-# big.bin seeders, in tracker order: alice (c1, who downloaded it) first, then bob
-# (bob logged out + in again, which re-added him at the end; see tracker log).
-# Corrupt piece 1 of alice's copy on disk; carol must reject it by SHA-1 and get it from bob.
-cp "$F/big.bin" "$F/big.ref"
-printf 'CORRUPTED' | dd of="$DL1/big.bin" bs=1 seek=$((524288 + 1000)) conv=notrunc 2>/dev/null
+# mid.bin seeders: bob (original) and alice (downloaded copy). Corrupt EVERY piece of
+# alice's copy on disk. Downloads are parallel, so alice's worker serves whichever
+# piece it gets first: it fails its SHA-1, alice is never asked again, bob supplies
+# the rest -> exactly 1 bad piece, and the result must still be identical.
+for p in $(seq 0 39); do
+    printf 'CORRUPTED' | dd of="$DL1/mid.bin" bs=1 seek=$((p * 524288 + 1000)) conv=notrunc 2>/dev/null
+done
 send c4 "join_group g2";             expect c4 "^join request sent"
 send c2 "accept_request g2 carol";   expect c2 "^carol added to group g2"
 DL4="$RUN/dl_c4"; mkdir -p "$DL4"
-send c4 "download_file g2 big.bin $DL4"
-expect c4 "^download finished: \[C\] \[g2\] big.bin \(1 bad piece\(s\) re-fetched\)$" 20
-same_file "$F/big.ref" "$DL4/big.bin"
+send c4 "download_file g2 mid.bin $DL4"
+expect c4 "^download finished: \[C\] \[g2\] mid.bin \(1 bad piece\(s\) re-fetched\)$" 30
+expect c4 "^  pieces from: 127.0.0.1:7102=40$"   # every good piece came from bob
+same_file "$F/mid.bin" "$DL4/mid.bin"
+
+section "parallel download from 3 seeders"
+cp "$F/mid.bin" "$DL1/mid.bin"       # repair alice's copy: alice, bob and carol all seed good data now
+start_client c6 7106
+expect c6 "\[connected to tracker 1"
+send c6 "create_user dave pw_d";     expect c6 "^user dave created"
+send c6 "login dave pw_d";           expect c6 "^logged in as dave"
+send c6 "join_group g2";             expect c6 "^join request sent"
+send c2 "accept_request g2 dave";    expect c2 "^dave added to group g2"
+send c1 "list_files g2";             expect c1 "^  mid.bin  \(20971000 bytes, 40 pieces, 3 seeder\(s\)\)"
+DL6="$RUN/dl_c6"; mkdir -p "$DL6"
+send c6 "download_file g2 mid.bin $DL6"
+expect c6 "^download finished: \[C\] \[g2\] mid.bin$" 30
+# All three seeders contributed (each count >= 1); the counts add up to 40 (no piece twice).
+expect c6 "^  pieces from: 127.0.0.1:7101=[1-9][0-9]* 127.0.0.1:7102=[1-9][0-9]* 127.0.0.1:7104=[1-9][0-9]*$"
+counts=$(grep '^  pieces from:' "$RUN/c6.out" | tail -1 | grep -o '=[0-9]*' | tr -d '=' | paste -sd+ | bc)
+[ "$counts" = 40 ] && pass "piece counts add up to 40 (no duplicate downloads)" || fail "piece counts add up to $counts, not 40"
+same_file "$F/mid.bin" "$DL6/mid.bin"
 
 section "client skips a tracker that is down"
 printf '127.0.0.1 6199\n127.0.0.1 %s\n' "$TRACKER_PORT2" >"$RUN/info_dead_first.txt"
@@ -152,7 +181,7 @@ send c5 "create_user erin pw";       expect c5 "^user erin created"
 stop c5
 
 section "clean shutdown"
-for c in c1 c2 c4; do stop $c; done
+for c in c1 c2 c4 c6; do stop $c; done
 expect t1 "logout alice"   # "quit" logs out politely before exiting
 stop t1
 stop t2
