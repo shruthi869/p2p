@@ -21,8 +21,8 @@ std::vector<std::string> tokenize(const std::string& line) {
     return out;
 }
 
-ClientApp::ClientApp(TrackerLink& link, const Endpoint& self, SharedFiles& shared)
-    : link_(link), self_(self), shared_(shared) {}
+ClientApp::ClientApp(TrackerLink& link, const Endpoint& self, SharedFiles& shared, DownloadManager& downloads)
+    : link_(link), self_(self), shared_(shared), downloads_(downloads) {}
 
 bool ClientApp::request(MsgType type, const Args& fields, Message& reply) {
     std::string err;
@@ -107,6 +107,8 @@ bool ClientApp::execute(const std::string& line) {
     else if (cmd == "upload_file")    cmd_upload_file(a);
     else if (cmd == "list_files")     cmd_list_files(a[0]);
     else if (cmd == "stop_share")     cmd_stop_share(a);
+    else if (cmd == "download_file")  cmd_download_file(a);
+    else if (cmd == "show_downloads") cmd_show_downloads();
     else std::printf("error: '%s' is not implemented yet\n", cmd.c_str());
     return true;
 }
@@ -204,6 +206,41 @@ void ClientApp::cmd_list_files(const std::string& group) {
         parse_u64(size, sz);
         std::printf("  %s  (%s bytes, %llu pieces, %s seeder(s))\n", name.c_str(), size.c_str(),
                     static_cast<unsigned long long>(piece_count(sz)), seeders.c_str());
+    }
+}
+
+void ClientApp::cmd_download_file(const Args& a) {
+    if (user_.empty()) {
+        std::printf("error: %s\n", status_text(Status::NOT_LOGGED_IN));
+        return;
+    }
+    std::string err;
+    if (!downloads_.start(a[0], a[1], a[2], err)) {
+        std::printf("error: %s\n", err.c_str());
+        return;
+    }
+    std::printf("download started: [%s] %s -> %s\n", a[0].c_str(), a[1].c_str(), a[2].c_str());
+}
+
+// Spec format for a finished download: "[C] [group_id] filename".
+// We add [D] (downloading, with progress) and [F] (failed, with the reason).
+void ClientApp::cmd_show_downloads() {
+    const std::vector<DownloadStatus> all = downloads_.snapshot();
+    if (all.empty()) {
+        std::printf("no downloads\n");
+        return;
+    }
+    for (const auto& d : all) {
+        if (d.state == DownloadStatus::COMPLETED) {
+            std::printf("[C] [%s] %s\n", d.group.c_str(), d.name.c_str());
+        } else if (d.state == DownloadStatus::FAILED) {
+            std::printf("[F] [%s] %s - %s\n", d.group.c_str(), d.name.c_str(), d.error.c_str());
+        } else {
+            const unsigned pct = d.pieces_total ? static_cast<unsigned>(d.pieces_done * 100 / d.pieces_total) : 0;
+            std::printf("[D] [%s] %s %u%% (%llu/%llu pieces)\n", d.group.c_str(), d.name.c_str(), pct,
+                        static_cast<unsigned long long>(d.pieces_done),
+                        static_cast<unsigned long long>(d.pieces_total));
+        }
     }
 }
 

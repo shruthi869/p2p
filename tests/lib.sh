@@ -161,6 +161,18 @@ kill9() {  # kill9 NAME : simulate a crash (no cleanup at all)
     _close_fd "$1"
 }
 
+same_file() {  # same_file ORIGINAL COPY : byte-for-byte identical?
+    if cmp -s "$1" "$2"; then
+        pass "identical: $(basename "$2") ($(stat -c %s "$2") bytes, sha1 $(sha1sum "$2" | cut -c1-12)...)"
+    else
+        fail "files differ: $1 vs $2"
+    fi
+}
+
+no_part_files() {  # no_part_files DIR : no leftover partial downloads
+    if compgen -G "$1/*.part" >/dev/null; then fail "leftover .part files in $1"; else pass "no .part files left in $(basename "$1")"; fi
+}
+
 cleanup() {
     for name in "${!PID[@]}"; do kill -9 "${PID[$name]}" 2>/dev/null; done
     wait 2>/dev/null

@@ -1,12 +1,8 @@
 // server.cpp - accept loop, per-connection request loop, request dispatch.
 #include "server.h"
 
-#include <cerrno>
 #include <chrono>
 #include <cstdio>
-#include <cstring>
-#include <sys/socket.h>
-#include <unistd.h>
 
 namespace p2p {
 
@@ -35,107 +31,31 @@ const char* op_name(MsgType t) {
 }  // namespace
 
 TrackerServer::TrackerServer(TrackerState& state, int tracker_no, bool verbose)
-    : state_(state), tracker_no_(tracker_no), verbose_(verbose), start_ms_(now_ms()) {}
+    : state_(state), tracker_no_(tracker_no), verbose_(verbose), start_ms_(now_ms()),
+      server_([this](int fd) { serve(fd); }) {}
 
-TrackerServer::~TrackerServer() { stop(); }
-
-bool TrackerServer::start(const Endpoint& ep, std::string& err) {
-    listen_fd_ = listen_tcp(ep);
-    if (listen_fd_ < 0) {
-        err = "cannot listen on " + ep.str() + ": " + std::strerror(errno);
-        return false;
-    }
-    port_ = local_port(listen_fd_);
-    accept_thread_ = std::thread(&TrackerServer::accept_loop, this);
-    return true;
-}
-
-void TrackerServer::accept_loop() {
-    while (true) {
-        int fd = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
-        if (fd < 0) {
-            if (errno == EINTR || errno == ECONNABORTED) continue;
-            {
-                std::lock_guard<std::mutex> lock(conns_mu_);
-                if (stopping_) break;  // stop() shut the listening socket down
-            }
-            // e.g. EMFILE (out of fds): back off instead of spinning at 100% CPU.
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue;
-        }
-        std::lock_guard<std::mutex> lock(conns_mu_);
-        reap_finished_locked();
-        if (stopping_) {
-            ::close(fd);
-            break;
-        }
-        conns_.push_back(std::make_unique<Conn>());
-        Conn* conn = conns_.back().get();
-        conn->fd = fd;
-        conn->thread = std::thread(&TrackerServer::serve, this, conn);
-    }
-}
-
-// Join and free connection threads that have already finished, so a
-// long-running tracker does not pile up dead thread objects.
-void TrackerServer::reap_finished_locked() {
-    for (auto it = conns_.begin(); it != conns_.end();) {
-        if ((*it)->done) {
-            (*it)->thread.join();
-            ::close((*it)->fd);
-            it = conns_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-void TrackerServer::stop() {
-    {
-        std::lock_guard<std::mutex> lock(conns_mu_);
-        if (stopping_) return;
-        stopping_ = true;
-    }
-    // 1. Wake the accept thread: shutdown() makes a blocked accept() return.
-    if (listen_fd_ >= 0) ::shutdown(listen_fd_, SHUT_RDWR);
-    if (accept_thread_.joinable()) accept_thread_.join();
-    if (listen_fd_ >= 0) ::close(listen_fd_);
-    listen_fd_ = -1;
-
-    // 2. Wake every connection thread: shutdown() makes its blocked recv()
-    //    return 0, so it leaves its loop. Then join, then close.
-    std::lock_guard<std::mutex> lock(conns_mu_);
-    for (auto& c : conns_) ::shutdown(c->fd, SHUT_RDWR);
-    for (auto& c : conns_) {
-        c->thread.join();
-        ::close(c->fd);
-    }
-    conns_.clear();
-}
+// Stop the connection threads BEFORE the members they use are destroyed.
+TrackerServer::~TrackerServer() { server_.stop(); }
 
 // One thread per client: read a request, handle it, send the reply, repeat.
 // No recv timeout here: a logged-in client may legitimately stay idle for hours.
-void TrackerServer::serve(Conn* conn) {
+void TrackerServer::serve(int fd) {
     ClientSession cs;
     while (true) {
         Message req;
-        IoResult r = recv_msg(conn->fd, req);
+        IoResult r = recv_msg(fd, req);
         if (r != IoResult::OK) {
             if (r == IoResult::BAD_HEADER || r == IoResult::TOO_LARGE)
                 log(std::string("dropping connection: ") + io_result_name(r));
             break;
         }
         Message rep = handle(cs, req);
-        if (send_msg(conn->fd, rep) != IoResult::OK) break;
+        if (send_msg(fd, rep) != IoResult::OK) break;
     }
     // Client went away without "logout" (crash, Ctrl-C, network loss):
     // end its session so it stops being offered as a seeder.
     if (!cs.user.empty() && state_.apply({MsgType::LOGOUT, {cs.user, cs.session_id}}) == Status::OK)
         log(cs.user + " disconnected (auto logout)");
-    // Tell the peer we are done NOW (it sees EOF immediately). The fd itself
-    // is closed later by whoever joins this thread - see Conn in server.h.
-    ::shutdown(conn->fd, SHUT_RDWR);
-    conn->done = true;
 }
 
 std::string TrackerServer::new_session_id() {

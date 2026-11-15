@@ -1,6 +1,6 @@
 // client/main.cpp - entry point: ./client <IP>:<PORT> tracker_info.txt
-// <IP>:<PORT> is where THIS client will listen for other peers asking for
-// pieces (the peer server arrives in Part 5). Commands are read from stdin.
+// <IP>:<PORT> is where THIS client listens for other peers asking for
+// pieces (its peer server). Commands are read from stdin.
 #include <cstdio>
 #include <iostream>
 #include <string>
@@ -8,7 +8,9 @@
 #include <vector>
 
 #include "commands.h"
+#include "downloads.h"
 #include "net.h"
+#include "peer_server.h"
 #include "shared_files.h"
 #include "tracker_link.h"
 
@@ -34,11 +36,20 @@ int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     p2p::ignore_sigpipe();
 
+    // Order matters: objects are destroyed in reverse, so downloads stop
+    // (threads joined) before the peer server, which stops before the
+    // shared-file list and the tracker link they both use.
+    p2p::SharedFiles shared;
+    p2p::PeerServer peer_server(shared);
+    if (!peer_server.start(self, err)) {  // e.g. port already in use
+        std::fprintf(stderr, "client: %s\n", err.c_str());
+        return 1;
+    }
     p2p::TrackerLink link(trackers);
     if (!link.ensure_connected(err)) std::printf("warning: %s (will retry on each command)\n", err.c_str());
 
-    p2p::SharedFiles shared;
-    p2p::ClientApp app(link, self, shared);
+    p2p::DownloadManager downloads(link, shared, self);
+    p2p::ClientApp app(link, self, shared, downloads);
     const bool interactive = ::isatty(STDIN_FILENO);
     std::string line;
     while (true) {

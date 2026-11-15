@@ -117,6 +117,18 @@ bool hash_file(const std::string& path, FileMeta& out, std::string& err) {
     return true;
 }
 
+bool hash_fd(int fd, uint64_t size, std::string& hex_out) {
+    std::string buf(kPieceSize, '\0');
+    Sha1 h;
+    for (uint64_t off = 0; off < size; off += kPieceSize) {
+        const size_t len = static_cast<size_t>(size - off < kPieceSize ? size - off : kPieceSize);
+        if (!pread_full(fd, &buf[0], len, static_cast<off_t>(off))) return false;
+        h.update(buf.data(), len);
+    }
+    hex_out = Sha1::to_hex(h.digest());
+    return true;
+}
+
 std::string join_hashes(const std::vector<std::string>& hashes) {
     std::string s;
     s.reserve(hashes.size() * kHashHexLen);

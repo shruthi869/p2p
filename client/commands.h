@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "downloads.h"
 #include "net.h"
 #include "protocol.h"
 #include "shared_files.h"
@@ -13,7 +14,7 @@ namespace p2p {
 
 class ClientApp {
 public:
-    ClientApp(TrackerLink& link, const Endpoint& self, SharedFiles& shared);
+    ClientApp(TrackerLink& link, const Endpoint& self, SharedFiles& shared, DownloadManager& downloads);
 
     // Run one input line. Returns false when the user asked to quit.
     bool execute(const std::string& line);
@@ -37,12 +38,15 @@ private:
     void cmd_upload_file(const Args& a);
     void cmd_list_files(const std::string& group);
     void cmd_stop_share(const Args& a);
+    void cmd_download_file(const Args& a);
+    void cmd_show_downloads();
     void reshare_after_login();
     void print_help() const;
 
-    TrackerLink& link_;
-    Endpoint     self_;
-    SharedFiles& shared_;
+    TrackerLink&     link_;
+    Endpoint         self_;
+    SharedFiles&     shared_;
+    DownloadManager& downloads_;
     std::string  user_;         // who is logged in on this client ("" = nobody)
     std::string  shared_owner_; // whose files are in shared_ (kept across logout/login)
 };

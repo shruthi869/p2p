@@ -31,8 +31,33 @@ else
     fail "client peak memory ${peak_kb:-?} KB (expected < 50 MB)"
 fi
 
+section "download the 1 GiB file from one peer"
+start_client c2 7102
+expect c2 "\[connected to tracker 1"
+send c2 "create_user dl pw";    expect c2 "^user dl created"
+send c2 "login dl pw";          expect c2 "^logged in as dl"
+send c2 "join_group gl";        expect c2 "^join request sent"
+send c1 "accept_request gl dl"; expect c1 "^dl added to group gl"
+DL="$RUN/dl"; mkdir -p "$DL"
+t0=$(date +%s.%N)
+send c2 "download_file gl big1g.bin $DL"
+expect c2 "^download finished: \[C\] \[gl\] big1g.bin$" 300
+t1=$(date +%s.%N)
+secs=$(echo "$t1 - $t0" | bc)
+pass "1 GiB downloaded in ${secs}s ($(echo "1024 / $secs" | bc) MiB/s, includes final whole-file SHA-1 check)"
+same_file "$BIG" "$DL/big1g.bin"
+peak_kb=$(awk '/VmHWM/ {print $2}' "/proc/${PID[c2]}/status")
+if [ -n "$peak_kb" ] && [ "$peak_kb" -lt 50000 ]; then
+    pass "downloader peak memory ${peak_kb} KB for a 1 GiB download"
+else
+    fail "downloader peak memory ${peak_kb:-?} KB (expected < 50 MB)"
+fi
+peak_kb=$(awk '/VmHWM/ {print $2}' "/proc/${PID[c1]}/status")
+pass "seeder peak memory ${peak_kb} KB after serving 1 GiB"
+
+stop c2
 stop c1
 stop t1
 stop t2
-rm -f "$BIG"
+rm -f "$BIG" "$DL/big1g.bin"
 finish

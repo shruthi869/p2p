@@ -30,6 +30,10 @@ uint64_t piece_length(uint64_t file_size, uint64_t index);   // 512 KiB, or less
 // Memory use is constant whatever the file size.
 bool hash_file(const std::string& path, FileMeta& out, std::string& err);
 
+// SHA-1 of the first `size` bytes of an open file, read in 512 KiB chunks
+// with one buffer (constant memory). Used to verify a finished download.
+bool hash_fd(int fd, uint64_t size, std::string& hex_out);
+
 // Piece hashes travel as one string: 40 hex chars per piece, no separator
 // (fixed width, so no escaping is ever needed).
 std::string              join_hashes(const std::vector<std::string>& hashes);

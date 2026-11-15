@@ -52,7 +52,7 @@ section "input handling"
 send c1 "create_group";              expect c1 "^usage: create_group <group_id>"
 send c1 "fly_to_moon";               expect c1 "^error: unknown command 'fly_to_moon'"
 send c1 "join_group no_such_group";  expect c1 "^error: no such group"
-send c1 "show_downloads";            expect c1 "^error: 'show_downloads' is not implemented yet"
+send c1 "show_downloads";            expect c1 "^no downloads"
 
 section "upload_file / list_files / stop_share (group g2, owner bob on c2)"
 F="$RUN/files"; mkdir -p "$F/other" "$F/copy"
@@ -98,6 +98,26 @@ send c1 "list_files g2";                   expect c1 "^files in g2 \(2\):"
                                            expect c1 "^  exact512k.bin"
                                            expect c1 "^  small.txt  \(10 bytes, 1 pieces, 2 seeder\(s\)\)"
 
+section "download_file from one peer"
+DL1="$RUN/dl_c1"; mkdir -p "$DL1"
+send c1 "download_file g2 exact512k.bin $DL1";   expect c1 "^download started: \[g2\] exact512k.bin"
+                                                 expect c1 "^download finished: \[C\] \[g2\] exact512k.bin$" 20
+same_file "$F/exact512k.bin" "$DL1/exact512k.bin"
+send c2 "upload_file g2 $F/big.bin";             expect c2 "^uploaded big.bin"
+send c1 "download_file g2 big.bin $DL1";         expect c1 "^download finished: \[C\] \[g2\] big.bin$" 20
+same_file "$F/big.bin" "$DL1/big.bin"
+send c1 "download_file g2 small.txt $DL1";       expect c1 "^download finished: \[C\] \[g2\] small.txt$" 20
+same_file "$F/small.txt" "$DL1/small.txt"
+send c1 "show_downloads";                        expect c1 "^\[C\] \[g2\] exact512k.bin$"
+                                                 expect c1 "^\[C\] \[g2\] big.bin$"
+                                                 expect c1 "^\[C\] \[g2\] small.txt$"
+no_part_files "$DL1"
+send c1 "download_file g2 big.bin $DL1";         expect c1 "^error: .*big.bin already exists"
+send c1 "download_file g2 nope.bin $DL1";        expect c1 "^error: no such file in this group"
+send c1 "download_file g2 big.bin $F/small.txt"; expect c1 "^error: destination .* is not a directory"
+send c1 "download_file g9 big.bin $DL1";         expect c1 "^error: no such group"
+send c1 "list_files g2";                         expect c1 "^  big.bin  \(1572987 bytes, 4 pieces, 2 seeder\(s\)\)"  # alice now seeds it
+
 section "logout"
 send c2 "logout";                    expect c2 "^logged out"
 send c2 "list_groups";               expect c2 "^error: please log in first"
@@ -110,6 +130,19 @@ expect t1 "carol disconnected \(auto logout\)"
 start_client c4 7104
 expect c4 "\[connected to tracker 1"
 send c4 "login carol pw_c";          expect c4 "^logged in as carol"   # different address: only works if the old session ended
+
+section "corrupted piece is detected and re-fetched from another peer"
+# big.bin seeders, in tracker order: alice (c1, who downloaded it) first, then bob
+# (bob logged out + in again, which re-added him at the end; see tracker log).
+# Corrupt piece 1 of alice's copy on disk; carol must reject it by SHA-1 and get it from bob.
+cp "$F/big.bin" "$F/big.ref"
+printf 'CORRUPTED' | dd of="$DL1/big.bin" bs=1 seek=$((524288 + 1000)) conv=notrunc 2>/dev/null
+send c4 "join_group g2";             expect c4 "^join request sent"
+send c2 "accept_request g2 carol";   expect c2 "^carol added to group g2"
+DL4="$RUN/dl_c4"; mkdir -p "$DL4"
+send c4 "download_file g2 big.bin $DL4"
+expect c4 "^download finished: \[C\] \[g2\] big.bin \(1 bad piece\(s\) re-fetched\)$" 20
+same_file "$F/big.ref" "$DL4/big.bin"
 
 section "client skips a tracker that is down"
 printf '127.0.0.1 6199\n127.0.0.1 %s\n' "$TRACKER_PORT2" >"$RUN/info_dead_first.txt"

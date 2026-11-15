@@ -16,7 +16,7 @@ TRACKER_OBJS := $(addprefix $(OBJDIR)/,$(TRACKER_SRCS:.cpp=.o))
 CLIENT_OBJS  := $(addprefix $(OBJDIR)/,$(CLIENT_SRCS:.cpp=.o))
 
 TESTS := test_protocol$(SUFFIX) test_tracker$(SUFFIX) test_client$(SUFFIX) test_files$(SUFFIX) \
-         sha1tool$(SUFFIX)
+         test_download$(SUFFIX) sha1tool$(SUFFIX)
 
 all: $(TESTS)
 
@@ -35,9 +35,13 @@ test_tracker$(SUFFIX): $(OBJDIR)/test_tracker.o $(TRACKER_OBJS) $(COMMON_OBJS)
 test_client$(SUFFIX): $(OBJDIR)/test_client.o $(CLIENT_OBJS) $(TRACKER_OBJS) $(COMMON_OBJS)
 	$(CXX) $^ $(LDFLAGS) -o $@
 
+test_download$(SUFFIX): $(OBJDIR)/test_download.o $(CLIENT_OBJS) $(TRACKER_OBJS) $(COMMON_OBJS)
+	$(CXX) $^ $(LDFLAGS) -o $@
+
 clean:
 	rm -rf obj obj-asan obj-tsan test_protocol test_protocol-* test_tracker test_tracker-* \
-	       test_client test_client-* test_files test_files-* sha1tool sha1tool-*
+	       test_client test_client-* test_files test_files-* sha1tool sha1tool-* \
+	       test_download test_download-*
 
 -include $(wildcard $(OBJDIR)/*.d)
 
