@@ -229,6 +229,204 @@ Status TrackerState::list_requests(const std::string& actor, const std::string& 
     return Status::OK;
 }
 
+// ======================================================================
+// Tracker-to-tracker sync: snapshot, merge, drop
+// ======================================================================
+
+int session_owner(const std::string& session_id) {
+    if (session_id.size() >= 2 && session_id[1] == '-' && (session_id[0] == '1' || session_id[0] == '2'))
+        return session_id[0] - '0';
+    return 0;
+}
+
+namespace {
+
+std::string join_list(const std::vector<std::string>& v) {  // ids never contain ','
+    std::string s;
+    for (size_t i = 0; i < v.size(); ++i) s += (i ? "," : "") + v[i];
+    return s;
+}
+
+std::vector<std::string> split_on(const std::string& s, char sep) {
+    std::vector<std::string> out;
+    if (s.empty()) return out;
+    size_t start = 0;
+    while (true) {
+        size_t p = s.find(sep, start);
+        out.push_back(s.substr(start, p == std::string::npos ? std::string::npos : p - start));
+        if (p == std::string::npos) break;
+        start = p + 1;
+    }
+    return out;
+}
+
+// a, then the elements of b that a doesn't have (keeps a's order first).
+std::vector<std::string> ordered_union(const std::vector<std::string>& a, const std::vector<std::string>& b) {
+    std::vector<std::string> out = a;
+    for (const auto& x : b)
+        if (!contains(out, x)) out.push_back(x);
+    return out;
+}
+
+}  // namespace
+
+// Snapshot format: one record per field (fields separated by '\n'), the
+// parts of a record separated by '\t', lists inside a part by ','.
+//   U  user  digest
+//   S  user  peer_addr  session_id
+//   G  group  members  pending
+//   F  group  name  size  file_sha1  piece_sha1s  seeders
+// std::map iteration is sorted, so equal states give equal snapshots.
+std::string TrackerState::snapshot() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<std::string> recs;
+    for (const auto& u : users_) recs.push_back("U\t" + u.first + "\t" + u.second.digest);
+    for (const auto& s : sessions_)
+        recs.push_back("S\t" + s.first + "\t" + s.second.peer_addr + "\t" + s.second.session_id);
+    for (const auto& g : groups_) {
+        recs.push_back("G\t" + g.first + "\t" + join_list(g.second.members) + "\t" + join_list(g.second.pending));
+        for (const auto& f : g.second.files)
+            recs.push_back("F\t" + g.first + "\t" + f.first + "\t" + std::to_string(f.second.size) + "\t" +
+                           f.second.file_hash + "\t" + f.second.piece_hashes + "\t" + join_list(f.second.seeders));
+    }
+    return pack_fields(recs);
+}
+
+bool TrackerState::parse_snapshot(const std::string& s, Users& users, Sessions& sessions, Groups& groups) {
+    for (const auto& rec : split_fields(s)) {
+        const std::vector<std::string> p = split_on(rec, '\t');
+        if (p.empty()) return false;
+        if (p[0] == "U" && p.size() == 3) {
+            users[p[1]] = User{p[2]};
+        } else if (p[0] == "S" && p.size() == 4) {
+            sessions[p[1]] = Session{p[2], p[3]};
+        } else if (p[0] == "G" && p.size() == 4) {
+            Group g;
+            g.members = split_on(p[2], ',');
+            g.pending = split_on(p[3], ',');
+            if (g.members.empty()) return false;  // a group always has an owner
+            groups[p[1]] = g;
+        } else if (p[0] == "F" && p.size() == 7) {
+            auto g = groups.find(p[1]);
+            SharedFile f;
+            if (g == groups.end() || !parse_u64(p[3], f.size)) return false;
+            f.file_hash = p[4];
+            f.piece_hashes = p[5];
+            f.seeders = split_on(p[6], ',');
+            g->second.files[p[2]] = f;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+void TrackerState::prune_offline_seeders(Groups& groups, const Sessions& sessions) {
+    for (auto& g : groups) {
+        for (auto f = g.second.files.begin(); f != g.second.files.end();) {
+            auto& seeders = f->second.seeders;
+            seeders.erase(std::remove_if(seeders.begin(), seeders.end(),
+                                         [&](const std::string& u) { return sessions.count(u) == 0; }),
+                          seeders.end());
+            if (seeders.empty()) f = g.second.files.erase(f);
+            else ++f;
+        }
+    }
+}
+
+bool TrackerState::merge(const std::string& peer_snapshot, int peer_no, int my_no) {
+    Users pu;
+    Sessions ps;
+    Groups pg;
+    if (peer_no == my_no || !parse_snapshot(peer_snapshot, pu, ps, pg)) return false;
+
+    std::lock_guard<std::mutex> lock(mu_);
+    const bool i_am_1 = (my_no == 1);
+    // Name both copies by tracker number, not "mine/theirs": that is what
+    // makes the result identical on both trackers.
+    const Users& u1 = i_am_1 ? users_ : pu;
+    const Users& u2 = i_am_1 ? pu : users_;
+    const Sessions& s1 = i_am_1 ? sessions_ : ps;
+    const Sessions& s2 = i_am_1 ? ps : sessions_;
+    const Groups& g1 = i_am_1 ? groups_ : pg;
+    const Groups& g2 = i_am_1 ? pg : groups_;
+
+    // Users: union, tracker 1 wins a conflict.
+    Users users = u2;
+    for (const auto& kv : u1) users[kv.first] = kv.second;
+
+    // Sessions: tracker 1 is the authority for sessions it owns, tracker 2
+    // for its own; if one user is in both, tracker 1's session wins.
+    Sessions sessions;
+    for (const auto& kv : s2)
+        if (session_owner(kv.second.session_id) != 1) sessions[kv.first] = kv.second;
+    for (const auto& kv : s1)
+        if (session_owner(kv.second.session_id) != 2) sessions[kv.first] = kv.second;
+
+    // Groups.
+    Groups groups = g2;
+    for (const auto& kv : g1) {
+        auto it = groups.find(kv.first);
+        if (it == groups.end()) {
+            groups[kv.first] = kv.second;
+            continue;
+        }
+        const Group& a = kv.second;  // tracker 1's copy
+        const Group& b = it->second; // tracker 2's copy
+        if (a.members.front() != b.members.front()) {  // two different groups with one name
+            it->second = a;
+            continue;
+        }
+        Group m;
+        m.members = ordered_union(a.members, b.members);
+        for (const auto& u : ordered_union(a.pending, b.pending))
+            if (!contains(m.members, u)) m.pending.push_back(u);
+        m.files = b.files;
+        for (const auto& f : a.files) {
+            auto fb = m.files.find(f.first);
+            if (fb != m.files.end() && fb->second.file_hash == f.second.file_hash && fb->second.size == f.second.size) {
+                SharedFile combined = f.second;
+                combined.seeders = ordered_union(f.second.seeders, fb->second.seeders);
+                fb->second = combined;
+            } else {
+                m.files[f.first] = f.second;
+            }
+        }
+        it->second = m;
+    }
+    prune_offline_seeders(groups, sessions);
+
+    users_ = std::move(users);
+    sessions_ = std::move(sessions);
+    groups_ = std::move(groups);
+    return true;
+}
+
+size_t TrackerState::drop_sessions_owned_by(int tracker_no) {
+    std::lock_guard<std::mutex> lock(mu_);
+    size_t dropped = 0;
+    for (auto it = sessions_.begin(); it != sessions_.end();) {
+        if (session_owner(it->second.session_id) == tracker_no) {
+            it = sessions_.erase(it);
+            ++dropped;
+        } else {
+            ++it;
+        }
+    }
+    prune_offline_seeders(groups_, sessions_);
+    return dropped;
+}
+
+TrackerState::Counts TrackerState::counts() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    Counts c;
+    c.users = users_.size();
+    c.sessions = sessions_.size();
+    c.groups = groups_.size();
+    for (const auto& g : groups_) c.files += g.second.files.size();
+    return c;
+}
+
 bool TrackerState::user_exists(const std::string& user) const {
     std::lock_guard<std::mutex> lock(mu_);
     return users_.count(user) != 0;

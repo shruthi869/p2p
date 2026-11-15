@@ -152,6 +152,7 @@ const char* status_text(Status s) {
         case Status::NO_SUCH_PIECE:     return "peer does not have that piece";
         case Status::INTERNAL_ERROR:    return "internal error";
         case Status::NOT_SHARING:       return "you are not sharing this file";
+        case Status::SYNC_REFUSED:      return "tracker sync is switched off";
     }
     return "unknown status";
 }

@@ -37,6 +37,11 @@ void TrackerLink::remember_login(const std::string& user, const std::string& pas
     peer_addr_ = peer_addr;
 }
 
+void TrackerLink::set_reannounce(Reannounce fn) {
+    std::lock_guard<std::mutex> lock(mu_);
+    reannounce_ = std::move(fn);
+}
+
 void TrackerLink::forget_login() {
     std::lock_guard<std::mutex> lock(mu_);
     have_login_ = false;
@@ -78,9 +83,24 @@ bool TrackerLink::connect_locked(std::string& err) {
                 disconnect_locked();
                 continue;
             }
-            if (rep.status != Status::OK)
+            if (rep.status != Status::OK) {
                 std::fprintf(stderr, "warning: re-login on tracker %zu failed: %s\n", idx + 1,
                              status_text(rep.status));
+            } else if (reannounce_) {
+                // Tell the new tracker again which files we share.
+                size_t ok = 0;
+                const auto files = reannounce_();
+                for (const auto& fields : files) {
+                    Message up{MsgType::UPLOAD_FILE, Status::OK, pack_fields(fields)};
+                    Message r;
+                    if (!exchange_locked(up, r)) break;
+                    if (r.status == Status::OK) ++ok;
+                }
+                if (announce_ && !files.empty()) {
+                    std::printf("[re-announced %zu of %zu shared file(s) to tracker %zu]\n", ok, files.size(), idx + 1);
+                    std::fflush(stdout);
+                }
+            }
         }
         const int now = static_cast<int>(idx) + 1;
         if (announce_ && now != last_announced_) {

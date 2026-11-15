@@ -180,9 +180,68 @@ expect c5 "\[connected to tracker 2 at 127.0.0.1:$TRACKER_PORT2\]"
 send c5 "create_user erin pw";       expect c5 "^user erin created"
 stop c5
 
+section "tracker sync: a client of tracker 2 sees and uses tracker 1's data"
+start_client c7 7107 "$RUN/info_dead_first.txt"    # this client can only reach tracker 2
+expect c7 "\[connected to tracker 2 at 127.0.0.1:$TRACKER_PORT2\]"
+send c7 "login erin pw";             expect c7 "^logged in as erin"        # erin was created on tracker 2
+send c7 "list_groups";               expect c7 "^groups \(2\):"            # g1, g2 were created on tracker 1
+                                     expect c7 "^  g1"
+                                     expect c7 "^  g2"
+send c7 "create_group g7";           expect c7 "^group g7 created"
+retry c1 "list_groups" "^  g7"                                             # ...and back to tracker 1
+send c7 "join_group g2";             expect c7 "^join request sent"
+retry c2 "list_requests g2" "^  erin"                                      # bob (tracker 1) sees erin's request
+send c2 "accept_request g2 erin";    expect c2 "^erin added to group g2"
+retry c7 "list_files g2" "^  mid.bin  \(20971000 bytes, 40 pieces, 4 seeder\(s\)\)"
+DL7="$RUN/dl_c7"; mkdir -p "$DL7"
+send c7 "download_file g2 mid.bin $DL7"                                    # from peers registered on tracker 1
+expect c7 "^download finished: \[C\] \[g2\] mid.bin$" 30
+same_file "$F/mid.bin" "$DL7/mid.bin"
+
+section "tracker 1 crashes (kill -9): clients fail over to tracker 2 and keep sharing"
+kill9 t1
+expect t2 "sync: tracker 1 unreachable; dropped its 4 session\(s\)"       # alice, bob, carol, dave
+send c1 "list_groups";               expect c1 "^\[re-announced [1-9][0-9]* of [1-9][0-9]* shared file\(s\) to tracker 2\]"
+                                     expect c1 "^\[connected to tracker 2 at 127.0.0.1:$TRACKER_PORT2\]"
+                                     expect c1 "^groups \(3\):"
+for c in c2 c4 c6; do
+    send $c "list_groups";           expect $c "^\[connected to tracker 2"
+done
+send c7 "list_files g2";             expect c7 "^  mid.bin  \(20971000 bytes, 40 pieces, 5 seeder\(s\)\)"   # all re-announced
+send c6 "download_file g2 notes.txt $DL6"
+expect c6 "^download finished: \[C\] \[g2\] notes.txt$" 20                  # downloads still work
+same_file "$F/notes.txt" "$DL6/notes.txt"
+
+section "tracker 1 restarts with an empty state and catches up from tracker 2"
+start_tracker 1
+expect t1 "sync: merged snapshot from tracker 2"
+expect t2 "sync: connected to tracker 1"
+start_client c8 7108                                                        # prefers tracker 1
+expect c8 "\[connected to tracker 1 at 127.0.0.1:$TRACKER_PORT1\]"
+send c8 "create_user erin x";        expect c8 "^error: user already exists"   # learned from the snapshot
+send c8 "create_user fay pw_f";      expect c8 "^user fay created"
+send c8 "login fay pw_f";            expect c8 "^logged in as fay"
+send c8 "list_groups";               expect c8 "^groups \(3\):"
+                                     expect c8 "^  g1"
+                                     expect c8 "^  g2"
+                                     expect c8 "^  g7"
+
+section "partition: sync off, both sides change, sync on, both see everything"
+send t1 "sync off";                  expect t1 "sync disabled \(simulated partition\)"
+expect t2 "sync: tracker 1 unreachable"
+send c8 "create_group left_g";       expect c8 "^group left_g created"     # tracker 1 side
+send c7 "create_group right_g";      expect c7 "^group right_g created"    # tracker 2 side
+send c8 "list_groups";               expect c8 "^groups \(4\):"            # right_g not visible yet
+send c7 "list_groups";               expect c7 "^groups \(4\):"            # left_g not visible yet
+send t1 "sync on";                   expect t1 "sync enabled"
+expect t1 "sync: merged snapshot from tracker 2"
+retry c8 "list_groups" "^groups \(5\):"
+retry c7 "list_groups" "^groups \(5\):"
+retry t1 "status" "status: .* 5 groups, .*sync connected"
+
 section "clean shutdown"
-for c in c1 c2 c4 c6; do stop $c; done
-expect t1 "logout alice"   # "quit" logs out politely before exiting
+for c in c1 c2 c4 c6 c7 c8; do stop $c; done
+expect t2 "logout alice"   # "quit" logs out politely; alice is on tracker 2 since the failover
 stop t1
 stop t2
 

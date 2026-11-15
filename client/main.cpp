@@ -46,6 +46,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     p2p::TrackerLink link(trackers);
+    link.set_reannounce([&shared] {
+        std::vector<std::vector<std::string>> out;
+        for (const auto& f : shared.all())
+            out.push_back({f.group, f.meta.name, std::to_string(f.meta.size), f.meta.file_hash,
+                           p2p::join_hashes(f.meta.piece_hashes)});
+        return out;
+    });
     if (!link.ensure_connected(err)) std::printf("warning: %s (will retry on each command)\n", err.c_str());
 
     p2p::DownloadManager downloads(link, shared, self);

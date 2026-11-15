@@ -30,17 +30,25 @@ const char* op_name(MsgType t) {
 
 }  // namespace
 
-TrackerServer::TrackerServer(TrackerState& state, int tracker_no, bool verbose)
-    : state_(state), tracker_no_(tracker_no), verbose_(verbose), start_ms_(now_ms()),
+TrackerServer::TrackerServer(TrackerState& state, int tracker_no, bool verbose, SyncLink* sync)
+    : state_(state), tracker_no_(tracker_no), verbose_(verbose), sync_(sync), start_ms_(now_ms()),
       server_([this](int fd) { serve(fd); }) {}
 
 // Stop the connection threads BEFORE the members they use are destroyed.
 TrackerServer::~TrackerServer() { server_.stop(); }
 
-// One thread per client: read a request, handle it, send the reply, repeat.
-// No recv timeout here: a logged-in client may legitimately stay idle for hours.
+// Every change made by one of OUR clients goes through here: applied locally
+// and forwarded to the other tracker (if there is a sync link).
+Status TrackerServer::apply_local(const Op& op) {
+    return sync_ ? sync_->apply_and_forward(op) : state_.apply(op);
+}
+
+// One thread per connection: read a request, handle it, send the reply, repeat.
+// No recv timeout for clients: a logged-in client may stay idle for hours.
+// (The other tracker's sync link gets one - see SYNC_HELLO.)
 void TrackerServer::serve(int fd) {
     ClientSession cs;
+    cs.fd = fd;
     while (true) {
         Message req;
         IoResult r = recv_msg(fd, req);
@@ -50,12 +58,78 @@ void TrackerServer::serve(int fd) {
             break;
         }
         Message rep = handle(cs, req);
-        if (send_msg(fd, rep) != IoResult::OK) break;
+        if (send_msg(fd, rep) != IoResult::OK || cs.drop) break;
+    }
+    if (cs.peer_tracker) {
+        // The other tracker went away (crash, frozen = no heartbeat, or a
+        // partition). We can no longer vouch for ITS clients: forget their
+        // sessions. They fail over to us and log in again, or come back in
+        // that tracker's next snapshot.
+        const size_t n = state_.drop_sessions_owned_by(cs.peer_tracker);
+        log("sync: tracker " + std::to_string(cs.peer_tracker) + " unreachable; dropped its " +
+            std::to_string(n) + " session(s)");
+        return;
     }
     // Client went away without "logout" (crash, Ctrl-C, network loss):
     // end its session so it stops being offered as a seeder.
-    if (!cs.user.empty() && state_.apply({MsgType::LOGOUT, {cs.user, cs.session_id}}) == Status::OK)
+    if (!cs.user.empty() && apply_local({MsgType::LOGOUT, {cs.user, cs.session_id}}) == Status::OK)
         log(cs.user + " disconnected (auto logout)");
+}
+
+// Messages on the other tracker's sync link (see sync.h).
+Message TrackerServer::handle_sync(ClientSession& cs, const Message& req) {
+    Message rep;
+    rep.type = reply_type(req.type);
+    if (!sync_accept_) {  // "sync off": refuse and hang up
+        rep.status = Status::SYNC_REFUSED;
+        cs.drop = true;
+        return rep;
+    }
+    if (req.type == MsgType::SYNC_HELLO) {
+        const int other = tracker_no_ == 1 ? 2 : 1;
+        if (cs.peer_tracker || !cs.user.empty() || req.payload != std::to_string(other)) {
+            rep.status = Status::BAD_REQUEST;
+            cs.drop = true;
+            return rep;
+        }
+        cs.peer_tracker = other;
+        // The peer PINGs every second; silence for longer means it is dead
+        // or frozen, and recv() then fails -> serve() ends -> sessions dropped.
+        set_io_timeout(cs.fd, SyncLink::kPeerSilenceMs);
+        return rep;
+    }
+    if (!cs.peer_tracker) {  // SNAPSHOT/OP without HELLO
+        rep.status = Status::BAD_REQUEST;
+        cs.drop = true;
+        return rep;
+    }
+    if (req.type == MsgType::SYNC_SNAPSHOT) {
+        if (!state_.merge(req.payload, cs.peer_tracker, tracker_no_)) {
+            rep.status = Status::BAD_REQUEST;
+            cs.drop = true;
+            return rep;
+        }
+        const auto c = state_.counts();
+        log("sync: merged snapshot from tracker " + std::to_string(cs.peer_tracker) + " (now " +
+            std::to_string(c.users) + " users, " + std::to_string(c.groups) + " groups, " +
+            std::to_string(c.files) + " files)");
+        return rep;
+    }
+    if (req.type == MsgType::SYNC_OP) {
+        Op op;
+        if (!decode_op(req.payload, op)) {
+            rep.status = Status::BAD_REQUEST;
+            cs.drop = true;
+            return rep;
+        }
+        // Applied locally only - never forwarded back (no echo loops). A
+        // rejected op (e.g. already applied) is fine: the reply is still OK
+        // so the link keeps flowing.
+        state_.apply(op);
+        return rep;
+    }
+    // PING (heartbeat)
+    return rep;
 }
 
 std::string TrackerServer::new_session_id() {
@@ -71,9 +145,17 @@ Message TrackerServer::handle(ClientSession& cs, const Message& req) {
     const std::vector<std::string> f = split_fields(req.payload);
     const bool logged_in = !cs.user.empty();
 
-    // Apply a state change and log it if it succeeded.
+    if (req.type == MsgType::SYNC_HELLO || req.type == MsgType::SYNC_SNAPSHOT || req.type == MsgType::SYNC_OP ||
+        (cs.peer_tracker && req.type == MsgType::PING))
+        return handle_sync(cs, req);
+    if (cs.peer_tracker) {  // the sync link carries sync messages only
+        rep.status = Status::BAD_REQUEST;
+        return rep;
+    }
+
+    // Apply a state change (+ forward it to the other tracker) and log it.
     auto apply = [&](const Op& op) {
-        Status s = state_.apply(op);
+        Status s = apply_local(op);
         if (s == Status::OK && verbose_) {
             std::string line = op_name(op.type);
             for (size_t i = 0; i < op.args.size(); ++i) {
@@ -107,7 +189,10 @@ Message TrackerServer::handle(ClientSession& cs, const Message& req) {
             } else {
                 std::string sid = new_session_id();
                 rep.status = apply({MsgType::LOGIN, {f[0], password_digest(f[0], f[1]), peer.str(), sid}});
-                if (rep.status == Status::OK) cs = ClientSession{f[0], sid};
+                if (rep.status == Status::OK) {
+                    cs.user = f[0];
+                    cs.session_id = sid;
+                }
             }
             break;
         }
@@ -117,7 +202,8 @@ Message TrackerServer::handle(ClientSession& cs, const Message& req) {
                 rep.status = Status::NOT_LOGGED_IN;
             } else {
                 rep.status = apply({MsgType::LOGOUT, {cs.user, cs.session_id}});
-                cs = ClientSession{};  // this connection is logged out either way
+                cs.user.clear();  // this connection is logged out either way
+                cs.session_id.clear();
             }
             break;
 

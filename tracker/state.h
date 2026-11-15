@@ -59,6 +59,11 @@ struct FileDetails {
 bool valid_id(const std::string& s);
 bool valid_password(const std::string& s);
 
+// Session ids look like "<tracker_no>-<start time>-<counter>": the tracker
+// that created a session (the one its client is connected to) owns it.
+// Returns 1 or 2, or 0 if the id has some other form.
+int session_owner(const std::string& session_id);
+
 class TrackerState {
 public:
     // Validate + apply one op atomically. Returns OK or the reason it was
@@ -73,6 +78,37 @@ public:
                       std::vector<FileSummary>& out) const;
     Status file_info(const std::string& actor, const std::string& group, const std::string& name,
                      FileDetails& out) const;
+
+    // ---- tracker-to-tracker sync (see sync.h for the protocol) ----
+
+    // The whole state as text. Canonical: equal states give equal strings,
+    // which is also how the tests check that two trackers have converged.
+    std::string snapshot() const;
+
+    // Merge the other tracker's snapshot into ours. The rules are written in
+    // terms of "tracker 1's copy" and "tracker 2's copy", so tracker 1
+    // merging 2's snapshot and tracker 2 merging 1's produce the SAME state:
+    //   users    : union; same id with different passwords -> tracker 1's wins
+    //   sessions : each tracker is the authority for sessions it created
+    //              (clients connected to it); same user in both -> tracker 1's
+    //   groups   : union; same id and same owner -> members/requests/files
+    //              combined (tracker 1's order first); different owners
+    //              (created independently during a partition) -> tracker 1's
+    //   files    : same name+content -> seeder lists combined; different
+    //              content -> tracker 1's
+    // Afterwards, seeders who are not online are removed (logout = stop sharing).
+    // Returns false (and changes nothing) if the snapshot is malformed.
+    bool merge(const std::string& peer_snapshot, int peer_no, int my_no);
+
+    // The other tracker is unreachable: forget the sessions it vouched for
+    // (its clients will fail over and log in here, or come back in its next
+    // snapshot), and their seeder entries. Returns how many were dropped.
+    size_t drop_sessions_owned_by(int tracker_no);
+
+    struct Counts {
+        size_t users = 0, sessions = 0, groups = 0, files = 0;
+    };
+    Counts counts() const;
 
     // Small helpers for tests and logs.
     bool        user_exists(const std::string& user) const;
@@ -119,6 +155,13 @@ private:
     // Remove `user` as a seeder from the files of one group / every group.
     static void drop_seeder(Group& g, const std::string& user);
     void        drop_seeder_everywhere(const std::string& user);
+
+    using Users = std::map<std::string, User>;
+    using Sessions = std::map<std::string, Session>;
+    using Groups = std::map<std::string, Group>;
+    static bool parse_snapshot(const std::string& s, Users& u, Sessions& se, Groups& g);
+    // Seeders must be online: drop the others, and files left with no seeder.
+    static void prune_offline_seeders(Groups& g, const Sessions& se);
 
     // One mutex for the whole state: simple, obviously deadlock-free, and the
     // tracker's work per request is tiny (map lookups), so contention is low.

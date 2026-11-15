@@ -9,6 +9,7 @@
 // download threads (later parts) can share the link with the command loop.
 #pragma once
 
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -37,6 +38,13 @@ public:
     void remember_login(const std::string& user, const std::string& password, const std::string& peer_addr);
     void forget_login();
 
+    // After a failover re-login, the new tracker may not list us as a seeder
+    // (it drops the dead tracker's sessions and their seeder entries), so we
+    // announce our shared files again. The function returns one UPLOAD_FILE
+    // field list per shared file. (It must not call back into this link.)
+    using Reannounce = std::function<std::vector<std::vector<std::string>>()>;
+    void set_reannounce(Reannounce fn);
+
     int connected_tracker() const;  // 1 or 2; 0 = not connected
 
 private:
@@ -53,6 +61,7 @@ private:
     int                   last_announced_ = 0; // last tracker we told the user about
     bool                  have_login_ = false;
     std::string           user_, password_, peer_addr_;
+    Reannounce            reannounce_;
 };
 
 }  // namespace p2p

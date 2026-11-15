@@ -17,6 +17,7 @@
 #include "net.h"
 #include "server.h"
 #include "state.h"
+#include "sync.h"
 
 namespace {
 
@@ -63,15 +64,17 @@ int main(int argc, char** argv) {
     p2p::ignore_sigpipe();
 
     p2p::TrackerState state;
-    p2p::TrackerServer server(state, no, /*verbose=*/true);
+    p2p::SyncLink sync(state, no, trackers[no == 1 ? 1 : 0], /*verbose=*/true);  // pushes to the OTHER tracker
+    p2p::TrackerServer server(state, no, /*verbose=*/true, &sync);
     if (!server.start(trackers[no - 1], err)) {
         std::fprintf(stderr, "tracker: %s\n", err.c_str());
         ::close(sig_fd);
         return 1;
     }
-    std::printf("[tracker %d] listening on %s  (type 'quit' to stop)\n", no,
+    std::printf("[tracker %d] listening on %s  (commands: quit, status, sync off, sync on)\n", no,
                 trackers[no - 1].str().c_str());
     std::fflush(stdout);
+    sync.start();
 
     pollfd fds[2] = {{STDIN_FILENO, POLLIN, 0}, {sig_fd, POLLIN, 0}};
     std::string pending;
@@ -103,13 +106,30 @@ int main(int argc, char** argv) {
                     quit = true;
                     break;
                 }
-                if (!cmd.empty()) std::printf("[tracker %d] unknown command '%s' (try: quit)\n", no, cmd.c_str());
+                if (cmd == "sync off") {  // simulate a network partition between the trackers
+                    sync.set_enabled(false);
+                    server.set_sync_accept(false);
+                    std::printf("[tracker %d] sync disabled (simulated partition)\n", no);
+                } else if (cmd == "sync on") {
+                    server.set_sync_accept(true);
+                    sync.set_enabled(true);
+                    std::printf("[tracker %d] sync enabled\n", no);
+                } else if (cmd == "status") {
+                    const auto c = state.counts();
+                    std::printf("[tracker %d] status: %zu users, %zu online, %zu groups, %zu files; sync %s\n", no,
+                                c.users, c.sessions, c.groups, c.files,
+                                !sync.enabled() ? "off" : sync.connected() ? "connected" : "waiting for peer");
+                } else if (!cmd.empty()) {
+                    std::printf("[tracker %d] unknown command '%s' (try: quit, status, sync off, sync on)\n", no,
+                                cmd.c_str());
+                }
                 std::fflush(stdout);
             }
         }
     }
 
-    server.stop();
+    server.stop();  // no more client changes...
+    sync.stop();    // ...then stop pushing
     ::close(sig_fd);
     std::printf("[tracker %d] stopped\n", no);
     return 0;

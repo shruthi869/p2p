@@ -21,6 +21,8 @@ obj-*/
 /tests/test_download-*
 /tests/test_picker
 /tests/test_picker-*
+/tests/test_sync
+/tests/test_sync-*
 
 # hand-written practice code (personal, not part of the project)
 practice/

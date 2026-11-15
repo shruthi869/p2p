@@ -161,6 +161,28 @@ kill9() {  # kill9 NAME : simulate a crash (no cleanup at all)
     _close_fd "$1"
 }
 
+# retry NAME "command" REGEX [TIMEOUT_S] : send the command again and again
+# until its output contains a matching line. For state that arrives
+# asynchronously (tracker-to-tracker sync is eventually consistent).
+retry() {
+    local name=$1 cmd=$2 pat=$3 t=${4:-10}
+    local deadline=$((SECONDS + t * SCALE))
+    while :; do
+        send "$name" "$cmd"
+        sleep 0.3
+        if tail -n +"$((POS[$name] + 1))" "$RUN/$name.out" | grep -q -E -- "$pat"; then
+            sleep 0.2
+            POS[$name]=$(wc -l <"$RUN/$name.out")  # skip the rest of these listings
+            pass "$name: /$pat/ (after retrying '$cmd')"
+            return 0
+        fi
+        if [ $SECONDS -ge $deadline ]; then
+            fail "$name: '$cmd' never printed /$pat/ within ${t}s (see $RUN/$name.out)"
+            return 1
+        fi
+    done
+}
+
 same_file() {  # same_file ORIGINAL COPY : byte-for-byte identical?
     if cmp -s "$1" "$2"; then
         pass "identical: $(basename "$2") ($(stat -c %s "$2") bytes, sha1 $(sha1sum "$2" | cut -c1-12)...)"
