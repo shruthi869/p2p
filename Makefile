@@ -29,6 +29,7 @@ test: all tests
 	@for t in $(TEST_BINS); do echo "--- $$t$(SUFFIX)"; ./$$t$(SUFFIX) || exit 1; done
 	@echo "--- sha1 vs sha1sum"; SUF=$(SUFFIX) bash tests/sha1_crosscheck.sh
 	@echo "--- integration ($(MODE))"; MODE=$(MODE) bash tests/integration.sh
+	@echo "--- failure injection ($(MODE))"; MODE=$(MODE) bash tests/failures.sh
 
 # Same as `test`, plus the 1 GiB cases (slow: creates and hashes 1 GiB files).
 test-large: all tests
@@ -46,6 +47,7 @@ valgrind: all tests
 	    valgrind --quiet --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=all \
 	    --error-exitcode=1 ./$$t || exit 1; done
 	@echo "--- integration (valgrind)"; MODE=valgrind bash tests/integration.sh
+	@echo "--- failure injection (valgrind)"; MODE=valgrind bash tests/failures.sh
 
 clean:
 	for d in $(SUBDIRS); do $(MAKE) -C $$d clean; done
