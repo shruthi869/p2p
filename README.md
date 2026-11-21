@@ -4,7 +4,6 @@ A BitTorrent-style file sharing system in C++17, written with POSIX sockets and 
 
 - **Spec:** AOS Assignment 3, IIIT Hyderabad, Monsoon 2025.
 - **Technical report:** [REPORT.md](REPORT.md).
-- **Revision notes and interview Q&A:** [NOTES.md](NOTES.md).
 
 ---
 

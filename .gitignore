@@ -29,3 +29,7 @@ practice/
 
 # files created by test runs
 test_runs/
+
+# personal revision notes (kept locally, not published)
+NOTES.md
+BEGINNER_NOTES.md
